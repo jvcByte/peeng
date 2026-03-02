@@ -1,18 +1,10 @@
-use actix_web::{App, HttpResponse, HttpServer, Responder, get, middleware::Logger, post, web};
+use actix_web::{App, HttpResponse, HttpServer, Responder, middleware::Logger, web};
 use dotenvy::dotenv;
 use env_logger::Env;
 use log::info;
 
-#[get("/")]
-async fn hello() -> impl Responder {
-    HttpResponse::Ok().body("Hello, world!")
-}
-#[post("/echo")]
-async fn echo(req_body: String) -> impl Responder {
-    HttpResponse::Ok().body(req_body)
-}
-async fn manual_hello() -> impl Responder {
-    HttpResponse::Ok().body("Hello, There!")
+async fn health() -> impl Responder {
+    HttpResponse::Ok().json(serde_json::json!({"status": "Ok"}))
 }
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
@@ -24,9 +16,7 @@ async fn main() -> std::io::Result<()> {
     HttpServer::new(|| {
         App::new()
             .wrap(Logger::default())
-            .service(hello)
-            .service(echo)
-            .route("/manual_hello", web::get().to(manual_hello))
+            .route("/health", web::get().to(health))
     })
     .bind(("127.0.0.1", 8080))?
     .run()
