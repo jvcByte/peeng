@@ -2,10 +2,25 @@
 name = "peeng"
 version = "0.1.0"
 edition = "2024"
+description = ""
+license = "MIT OR Apache-2.0"
+repository = ""
+authors = ["jvcByte: jvc8463@gmail.com"]
 
 [dependencies]
-actix-web = "4"
-log = "0.4"
-env_logger = "0.10"
-dotenvy = "0.15"
-serde_json = "1.0"
+actix-cors = "0.7.1"
+actix-web = "4.13.0"
+argon2 = "0.5.3"
+chrono = "0.4.44"
+dotenvy = "0.15.7"
+
+entity = {path = "entity"}
+env_logger = "0.11.9"
+futures = "0.3.32"
+jsonwebtoken = { version = "10.3.0", features = ["rust_crypto"] }
+log = "0.4.29"
+migration = {path = "migration"}
+sea-orm = "1.1.19"
+serde = "1.0.228"
+serde_json = "1.0.149"
+uuid = { version = "1.22.0", features = ["v4"] }

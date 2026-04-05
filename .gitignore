@@ -1,2 +1,6 @@
 /target
 .env
+migration/target
+entity/target
+target/
+**/target/
