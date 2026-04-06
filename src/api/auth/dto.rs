@@ -60,3 +60,32 @@ pub struct TokenResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user: Option<crate::api::users::dto::UserResponse>,
 }
+
+impl TokenResponse {
+    /// Build a `TokenResponse` from a user model and a plaintext refresh token.
+    pub fn from_user(
+        user_model: crate::shared::models::users::user::Model,
+        refresh_plain: String,
+        include_user: bool,
+        cfg: &crate::shared::config::load_env_var::JwtConfig,
+    ) -> Result<Self, crate::shared::errors::api_errors::ApiError> {
+        use crate::shared::utils::auth_utils::create_jwt;
+        use crate::api::users::dto::UserResponse;
+        let access_token = create_jwt(user_model.id, Some(user_model.token_version), cfg)?;
+        Ok(Self {
+            access_token,
+            token_type: "Bearer".to_string(),
+            expires_in: cfg.access_exp_minutes * 60,
+            refresh_token: Some(refresh_plain),
+            user: if include_user {
+                Some(UserResponse {
+                    id: user_model.id,
+                    name: user_model.name,
+                    email: user_model.email,
+                })
+            } else {
+                None
+            },
+        })
+    }
+}

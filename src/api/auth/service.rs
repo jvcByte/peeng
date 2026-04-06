@@ -13,27 +13,90 @@ use sea_orm::prelude::DateTimeWithTimeZone;
 use sea_orm::{DatabaseConnection, Set, TransactionTrait};
 use uuid::Uuid;
 
-/// Sentinel used to propagate a typed "token not found" error out of a transaction
-/// without relying on fragile string matching.
-const TOKEN_NOT_FOUND: &str = "TOKEN_NOT_FOUND";
+/// Typed error for the token rotation transaction — avoids string matching on `TransactionError`.
+#[derive(Debug)]
+enum RotateError {
+    TokenNotFound,
+    UserNotFound,
+    Db(sea_orm::DbErr),
+    Jwt(String),
+}
+
+impl From<sea_orm::DbErr> for RotateError {
+    fn from(e: sea_orm::DbErr) -> Self {
+        RotateError::Db(e)
+    }
+}
+
+impl std::fmt::Display for RotateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RotateError::TokenNotFound => write!(f, "Invalid or expired refresh token"),
+            RotateError::UserNotFound => write!(f, "User not found"),
+            RotateError::Db(e) => write!(f, "DB error: {}", e),
+            RotateError::Jwt(e) => write!(f, "JWT error: {}", e),
+        }
+    }
+}
 
 pub struct AuthService;
 
 impl AuthService {
-    /// Create a new refresh token for a user and return the plaintext token.
-    pub async fn create_refresh_for_user(
+    /// Authenticate a user, update last_login, and create a refresh token atomically.
+    /// Returns `(user_model, refresh_token_plaintext)`.
+    pub async fn login(
         db: &DatabaseConnection,
-        user_id: Uuid,
-    ) -> Result<String, ApiError> {
+        email: &str,
+        password: &str,
+    ) -> Result<(user::Model, String), ApiError> {
+        use crate::shared::utils::auth_utils::verify_password;
+
+        if email.trim().is_empty() || password.is_empty() {
+            return Err(ApiError::BadRequest("Email and password must be provided".into()));
+        }
+
+        // Fetch and verify credentials outside the transaction — Argon2 is CPU-intensive
+        let user = UserRepository::find_by_email(db, email)
+            .await
+            .map_err(|e| ApiError::InternalError(e.to_string()))?
+            .ok_or_else(|| ApiError::Unauthorized("Invalid credentials".into()))?;
+
+        if !user.is_active {
+            return Err(ApiError::Unauthorized("Invalid credentials".into()));
+        }
+        if !verify_password(&user.password_hash, &password)? {
+            return Err(ApiError::Unauthorized("Invalid credentials".into()));
+        }
+
         let cfg = JwtConfig::get();
         let plain = generate_refresh_token();
         let expires_at = Some(DateTimeWithTimeZone::from(
             timestamp_to_datetime(refresh_expiry_timestamp(cfg))?,
         ));
-        RefreshTokenRepository::create(db, user_id, plain.clone(), expires_at)
+        let user_id = user.id;
+        let plain_for_txn = plain.clone();
+
+        // Update last_login and create refresh token atomically
+        let user_model = db
+            .transaction::<_, user::Model, sea_orm::DbErr>(|txn| {
+                Box::pin(async move {
+                    use crate::shared::models::users::user::ActiveModel;
+                    use chrono::Utc;
+                    use sea_orm::ActiveModelTrait;
+                    let active = ActiveModel {
+                        id: Set(user_id),
+                        last_login: Set(Some(Utc::now().into())),
+                        ..Default::default()
+                    };
+                    let updated = active.update(txn).await?;
+                    RefreshTokenRepository::create(txn, user_id, plain_for_txn, expires_at).await?;
+                    Ok(updated)
+                })
+            })
             .await
-            .map_err(|e| ApiError::InternalError(format!("DB error storing refresh token: {}", e)))?;
-        Ok(plain)
+            .map_err(|e| ApiError::InternalError(format!("Login session creation failed: {}", e)))?;
+
+        Ok((user_model, plain))
     }
 
     /// Register a user and create their first refresh token atomically.
@@ -74,7 +137,6 @@ impl AuthService {
         let user_model = db
             .transaction::<_, user::Model, sea_orm::DbErr>(|txn| {
                 Box::pin(async move {
-                    use sea_orm::EntityTrait;
                     let active = ActiveModel {
                         id: Set(id),
                         name: Set(name),
@@ -85,9 +147,7 @@ impl AuthService {
                         created_at: Set(Some(Utc::now().into())),
                         ..Default::default()
                     };
-                    let model = crate::shared::models::users::User::insert(active)
-                        .exec_with_returning(txn)
-                        .await?;
+                    let model = UserRepository::insert(txn, active).await?;
                     RefreshTokenRepository::create(txn, id, plain_for_txn, expires_at).await?;
                     Ok(model)
                 })
@@ -122,37 +182,40 @@ impl AuthService {
         let new_plain_for_txn = new_plain.clone();
 
         let access_token = db
-            .transaction::<_, String, sea_orm::DbErr>(|txn| {
+            .transaction::<_, String, RotateError>(|txn| {
                 Box::pin(async move {
                     let record = RefreshTokenRepository::find_active_by_token_hash(txn, &incoming_hash)
-                        .await?
-                        .ok_or_else(|| {
-                            // Use a typed sentinel — avoids fragile string matching on the outside
-                            sea_orm::DbErr::Custom(TOKEN_NOT_FOUND.to_string())
-                        })?;
+                        .await
+                        .map_err(RotateError::Db)?
+                        .ok_or(RotateError::TokenNotFound)?;
 
                     let user = UserRepository::find_by_id(txn, record.user_id)
-                        .await?
-                        .ok_or_else(|| sea_orm::DbErr::RecordNotFound("User not found".into()))?;
+                        .await
+                        .map_err(RotateError::Db)?
+                        .ok_or(RotateError::UserNotFound)?;
 
                     let token = create_jwt(record.user_id, Some(user.token_version), JwtConfig::get())
-                        .map_err(|e| sea_orm::DbErr::Custom(e.to_string()))?;
+                        .map_err(|e| RotateError::Jwt(e.to_string()))?;
 
                     RefreshTokenRepository::create(txn, record.user_id, new_plain_for_txn, new_expires_at)
-                        .await?;
-                    RefreshTokenRepository::revoke_by_id(txn, record.id).await?;
+                        .await
+                        .map_err(RotateError::Db)?;
+                    RefreshTokenRepository::revoke_by_id(txn, record.id)
+                        .await
+                        .map_err(RotateError::Db)?;
 
                     Ok(token)
                 })
             })
             .await
-            .map_err(|e| {
-                // Match on the typed sentinel — no fragile substring search
-                if e.to_string().contains(TOKEN_NOT_FOUND) {
+            .map_err(|e| match e {
+                sea_orm::TransactionError::Transaction(RotateError::TokenNotFound) => {
                     ApiError::Unauthorized("Invalid or expired refresh token".into())
-                } else {
-                    ApiError::InternalError(format!("Token rotation failed: {}", e))
                 }
+                sea_orm::TransactionError::Transaction(RotateError::UserNotFound) => {
+                    ApiError::NotFound("User not found".into())
+                }
+                e => ApiError::InternalError(format!("Token rotation failed: {}", e)),
             })?;
 
         Ok((access_token, new_plain))

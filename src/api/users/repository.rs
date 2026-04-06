@@ -31,6 +31,19 @@ impl UserRepository {
             .await
     }
 
+    pub async fn insert(
+        db: &impl ConnectionTrait,
+        model: user::ActiveModel,
+    ) -> Result<user::Model, sea_orm::DbErr> {
+        User::insert(model).exec_with_returning(db).await
+    }
+
+    /// Update a user model.
+    ///
+    /// Note: takes `&DatabaseConnection` rather than `&impl ConnectionTrait` because
+    /// `ActiveModelTrait::update` in SeaORM requires a concrete `DatabaseConnection`.
+    /// This means `update` cannot be called inside a transaction via `ConnectionTrait`.
+    /// Use `update_many` with explicit filters for transaction-safe partial updates.
     pub async fn update(
         db: &DatabaseConnection,
         model: user::ActiveModel,

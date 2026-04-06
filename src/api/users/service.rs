@@ -1,53 +1,14 @@
 use crate::api::users::dto::{UpdateUser, UserResponse};
 use crate::api::users::repository::UserRepository;
 use crate::shared::errors::api_errors::ApiError;
-use crate::shared::models::users::user;
 use crate::shared::models::users::user::ActiveModel;
-use crate::shared::utils::auth_utils::verify_password;
 use crate::shared::utils::validation::{is_unique_violation, is_valid_email};
-use chrono::Utc;
 use sea_orm::{DatabaseConnection, Set};
 use uuid::Uuid;
 
 pub struct UserService;
 
 impl UserService {
-    /// Authenticate a user. Returns the `user_model` on success — the handler
-    /// is responsible for issuing tokens after creating the refresh token.
-    pub async fn login(
-        db: &DatabaseConnection,
-        email: &str,
-        password: &str,
-    ) -> Result<user::Model, ApiError> {
-        if email.trim().is_empty() || password.is_empty() {
-            return Err(ApiError::BadRequest("Email and password must be provided".into()));
-        }
-
-        let user = UserRepository::find_by_email(db, email)
-            .await
-            .map_err(|e| ApiError::InternalError(e.to_string()))?
-            .ok_or_else(|| ApiError::Unauthorized("Invalid credentials".into()))?;
-
-        if !user.is_active {
-            return Err(ApiError::Unauthorized("Invalid credentials".into()));
-        }
-
-        if !verify_password(&user.password_hash, password)? {
-            return Err(ApiError::Unauthorized("Invalid credentials".into()));
-        }
-
-        let active = ActiveModel {
-            id: Set(user.id),
-            last_login: Set(Some(Utc::now().into())),
-            ..Default::default()
-        };
-        let updated = UserRepository::update(db, active)
-            .await
-            .map_err(|e| ApiError::InternalError(format!("DB update failed: {}", e)))?;
-
-        Ok(updated)
-    }
-
     pub async fn list_users(
         db: &DatabaseConnection,
         limit: u64,
