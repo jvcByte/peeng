@@ -3,7 +3,7 @@ use crate::api::users::repository::UserRepository;
 use crate::shared::errors::api_errors::ApiError;
 use crate::shared::models::users::user;
 use crate::shared::models::users::user::ActiveModel;
-use crate::shared::utils::auth_utils::{hash_password, verify_password};
+use crate::shared::utils::auth_utils::verify_password;
 use chrono::Utc;
 use sea_orm::{DatabaseConnection, DbErr, Set};
 use uuid::Uuid;
@@ -11,48 +11,6 @@ use uuid::Uuid;
 pub struct UserService;
 
 impl UserService {
-    /// Register a new user. Returns `(id, user_model)`.
-    pub async fn register_user(
-        db: &DatabaseConnection,
-        name: String,
-        email: String,
-        password: String,
-    ) -> Result<(Uuid, user::Model), ApiError> {
-        if name.trim().is_empty() {
-            return Err(ApiError::BadRequest("Name cannot be empty".into()));
-        }
-        if !is_valid_email(&email) {
-            return Err(ApiError::BadRequest("Invalid email address".into()));
-        }
-        if password.len() < 8 {
-            return Err(ApiError::BadRequest("Password must be at least 8 characters".into()));
-        }
-
-        let password_hash = hash_password(&password)?;
-        let id = Uuid::new_v4();
-        let active = ActiveModel {
-            id: Set(id),
-            name: Set(name),
-            email: Set(email),
-            password_hash: Set(password_hash),
-            is_active: Set(true),
-            token_version: Set(0),
-            created_at: Set(Some(Utc::now().into())),
-            ..Default::default()
-        };
-
-        let model = UserRepository::insert(db, active).await.map_err(|e| {
-            // Map DB unique constraint violation to a 409 rather than a 500
-            if is_unique_violation(&e) {
-                ApiError::Conflict("Email already exists".into())
-            } else {
-                ApiError::InternalError(format!("DB insert failed: {}", e))
-            }
-        })?;
-
-        Ok((id, model))
-    }
-
     /// Authenticate a user. Returns the `user_model` on success — the handler
     /// is responsible for issuing tokens after creating the refresh token.
     pub async fn login(
@@ -64,7 +22,6 @@ impl UserService {
             return Err(ApiError::BadRequest("Email and password must be provided".into()));
         }
 
-        // Generic error on both missing user and wrong password — prevents user enumeration
         let user = UserRepository::find_by_email(db, email)
             .await
             .map_err(|e| ApiError::InternalError(e.to_string()))?
@@ -190,17 +147,18 @@ impl UserService {
     }
 }
 
-/// Basic email format validation — checks for a single `@` with non-empty local and domain parts.
 fn is_valid_email(email: &str) -> bool {
     let email = email.trim();
     if let Some((local, domain)) = email.split_once('@') {
-        !local.is_empty() && domain.contains('.') && !domain.starts_with('.') && !domain.ends_with('.')
+        !local.is_empty()
+            && domain.contains('.')
+            && !domain.starts_with('.')
+            && !domain.ends_with('.')
     } else {
         false
     }
 }
 
-/// Detect a unique constraint violation from a SeaORM `DbErr`.
 fn is_unique_violation(err: &DbErr) -> bool {
     let msg = err.to_string().to_lowercase();
     msg.contains("unique") || msg.contains("duplicate") || msg.contains("23505")

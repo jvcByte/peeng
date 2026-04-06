@@ -1,4 +1,4 @@
-// crud-with-sea_orm/src/api/auth/dto.rs
+// src/api/auth/dto.rs
 //! Authentication-related DTOs: requests and responses used by the auth endpoints.
 
 use serde::{Deserialize, Serialize};

@@ -1,5 +1,5 @@
 use crate::shared::models::users::{User, user};
-use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
+use sea_orm::{ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, QueryFilter};
 use uuid::Uuid;
 
 pub struct UserRepository;
@@ -15,7 +15,7 @@ impl UserRepository {
     }
 
     pub async fn find_by_id(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         id: Uuid,
     ) -> Result<Option<user::Model>, sea_orm::DbErr> {
         User::find_by_id(id).one(db).await
@@ -29,15 +29,6 @@ impl UserRepository {
             .filter(user::Column::Email.eq(email))
             .one(db)
             .await
-    }
-
-    pub async fn insert(
-        db: &DatabaseConnection,
-        model: user::ActiveModel,
-    ) -> Result<user::Model, sea_orm::DbErr> {
-        let inserted = User::insert(model).exec_with_returning(db).await?;
-
-        Ok(inserted)
     }
 
     pub async fn update(

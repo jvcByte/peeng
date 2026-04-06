@@ -6,43 +6,47 @@ use crate::shared::config::app_state::AppState;
 use crate::shared::config::load_env_var::JwtConfig;
 use crate::shared::errors::api_errors::ApiError;
 use crate::shared::middleware::auth::AuthenticatedUser;
+use crate::shared::models::users::user;
 use crate::shared::utils::auth_utils::create_jwt;
 use actix_web::{HttpResponse, Result, web};
 use serde_json::json;
 
+/// Build a `TokenResponse` from a user model and a plaintext refresh token.
+fn build_token_response(
+    user_model: &user::Model,
+    refresh_plain: String,
+    include_user: bool,
+) -> Result<TokenResponse, ApiError> {
+    let cfg = JwtConfig::get();
+    let access_token = create_jwt(user_model.id, Some(user_model.token_version), cfg)?;
+    Ok(TokenResponse {
+        access_token,
+        token_type: "Bearer".to_string(),
+        expires_in: cfg.access_exp_minutes * 60,
+        refresh_token: Some(refresh_plain),
+        user: if include_user {
+            Some(UserResponse {
+                id: user_model.id,
+                name: user_model.name.clone(),
+                email: user_model.email.clone(),
+            })
+        } else {
+            None
+        },
+    })
+}
+
 /// Register a new user and return tokens + user info.
+/// User creation and refresh token creation are atomic — no orphaned accounts.
 pub async fn register(
     body: web::Json<RegisterRequest>,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, ApiError> {
     let req = body.into_inner();
-
-    let (id, user_model) = UserService::register_user(
-        &state.db,
-        req.name,
-        req.email,
-        req.password,
-    )
-    .await?;
-
-    // Create refresh token first, then issue access token with users.token_version
-    let refresh_plain = AuthService::create_refresh_for_user(&state.db, id).await?;
-
-    let cfg = JwtConfig::get();
-    let access_token = create_jwt(id, Some(user_model.token_version), cfg)?;
-    let expires_in = cfg.access_exp_minutes * 60;
-
-    Ok(HttpResponse::Created().json(TokenResponse {
-        access_token,
-        token_type: "Bearer".to_string(),
-        expires_in,
-        refresh_token: Some(refresh_plain),
-        user: Some(UserResponse {
-            id: user_model.id,
-            name: user_model.name,
-            email: user_model.email,
-        }),
-    }))
+    let (user_model, refresh_plain) =
+        AuthService::register(&state.db, req.name, req.email, req.password).await?;
+    let resp = build_token_response(&user_model, refresh_plain, true)?;
+    Ok(HttpResponse::Created().json(resp))
 }
 
 /// Login and return tokens + user info.
@@ -51,28 +55,10 @@ pub async fn login(
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, ApiError> {
     let req = body.into_inner();
-
-    // Authenticate — returns user model only, no token yet
     let user_model = UserService::login(&state.db, &req.email, &req.password).await?;
-
-    // Create refresh token, then issue access token with users.token_version
     let refresh_plain = AuthService::create_refresh_for_user(&state.db, user_model.id).await?;
-
-    let cfg = JwtConfig::get();
-    let access_token = create_jwt(user_model.id, Some(user_model.token_version), cfg)?;
-    let expires_in = cfg.access_exp_minutes * 60;
-
-    Ok(HttpResponse::Ok().json(TokenResponse {
-        access_token,
-        token_type: "Bearer".to_string(),
-        expires_in,
-        refresh_token: Some(refresh_plain),
-        user: Some(UserResponse {
-            id: user_model.id,
-            name: user_model.name,
-            email: user_model.email,
-        }),
-    }))
+    let resp = build_token_response(&user_model, refresh_plain, true)?;
+    Ok(HttpResponse::Ok().json(resp))
 }
 
 /// Rotate a refresh token and return a new access token + new refresh token.
@@ -85,25 +71,23 @@ pub async fn refresh(
         AuthService::verify_and_rotate_refresh(&state.db, &req.refresh_token).await?;
 
     let cfg = JwtConfig::get();
-    let expires_in = cfg.access_exp_minutes * 60;
-
     Ok(HttpResponse::Ok().json(TokenResponse {
         access_token,
         token_type: "Bearer".to_string(),
-        expires_in,
+        expires_in: cfg.access_exp_minutes * 60,
         refresh_token: Some(new_refresh_plain),
         user: None,
     }))
 }
 
-/// Revoke a refresh token and invalidate all access tokens for the user.
+/// Revoke a specific refresh token (single-device logout).
+/// Other sessions remain valid — use logout_all to invalidate everything.
 pub async fn logout(
     body: web::Json<RefreshRequest>,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, ApiError> {
     let req = body.into_inner();
-    let user_id = AuthService::revoke_refresh_token(&state.db, &req.refresh_token).await?;
-    UserService::increment_token_version(&state.db, user_id).await?;
+    AuthService::revoke_refresh_token(&state.db, &req.refresh_token).await?;
     Ok(HttpResponse::NoContent().finish())
 }
 
@@ -116,7 +100,7 @@ pub async fn me(user: AuthenticatedUser) -> Result<HttpResponse, ApiError> {
     }))
 }
 
-/// Revoke all sessions for the authenticated user (global logout).
+/// Revoke all sessions and invalidate all access tokens (global logout).
 pub async fn logout_all(
     user: AuthenticatedUser,
     state: web::Data<AppState>,

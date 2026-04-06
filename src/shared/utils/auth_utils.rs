@@ -7,10 +7,10 @@ use argon2::{
         rand_core::OsRng,
     },
 };
-use rand_core::RngCore;
 use chrono::{Duration, Utc};
 use hex::encode as hex_encode;
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, TokenData, Validation, decode, encode};
+use rand_core::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;

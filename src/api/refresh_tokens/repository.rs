@@ -33,7 +33,7 @@ impl RefreshTokenRepository {
     /// Find a single active (non-revoked, non-expired) token by hashing the presented plaintext
     /// and looking up the hash via the DB index.
     pub async fn find_active_by_token(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         token: &str,
     ) -> Result<Option<refresh_token::Model>, DbErr> {
         let token_hash = hash_token(token);
@@ -70,7 +70,7 @@ impl RefreshTokenRepository {
     }
 
     /// Revoke all active refresh tokens for a user — single UPDATE query.
-    pub async fn revoke_by_user(db: &DatabaseConnection, user_id: Uuid) -> Result<u64, DbErr> {
+    pub async fn revoke_by_user(db: &impl ConnectionTrait, user_id: Uuid) -> Result<u64, DbErr> {
         RefreshToken::update_many()
             .col_expr(
                 refresh_token::Column::Revoked,
