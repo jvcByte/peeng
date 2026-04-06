@@ -221,21 +221,32 @@ impl AuthService {
         Ok((access_token, new_plain))
     }
 
-    /// Revoke a specific refresh token (single-device logout).
+    /// Revoke a specific refresh token and increment the token version atomically (single-device logout).
+    /// Incrementing token_version immediately invalidates any outstanding access tokens for this user.
     pub async fn revoke_refresh_token(
         db: &DatabaseConnection,
         incoming_plain: &str,
     ) -> Result<(), ApiError> {
-        let record = RefreshTokenRepository::find_active_by_token(db, incoming_plain)
-            .await
-            .map_err(|_| ApiError::InternalError("DB error".to_string()))?
-            .ok_or_else(|| ApiError::Unauthorized("Invalid or expired refresh token".into()))?;
+        let incoming_hash = hash_token(incoming_plain);
 
-        RefreshTokenRepository::revoke_by_id(db, record.id)
-            .await
-            .map_err(|_| ApiError::InternalError("Failed to revoke refresh token".into()))?;
+        db.transaction::<_, (), sea_orm::DbErr>(|txn| {
+            Box::pin(async move {
+                let record = RefreshTokenRepository::find_active_by_token_hash(txn, &incoming_hash)
+                    .await?
+                    .ok_or_else(|| sea_orm::DbErr::RecordNotFound("Invalid or expired refresh token".into()))?;
 
-        Ok(())
+                RefreshTokenRepository::revoke_by_id(txn, record.id).await?;
+                UserRepository::increment_token_version(txn, record.user_id).await?;
+                Ok(())
+            })
+        })
+        .await
+        .map_err(|e| match e {
+            sea_orm::TransactionError::Transaction(sea_orm::DbErr::RecordNotFound(_)) => {
+                ApiError::Unauthorized("Invalid or expired refresh token".into())
+            }
+            e => ApiError::InternalError(format!("Logout failed: {}", e)),
+        })
     }
 
     /// Revoke all refresh tokens and invalidate all access tokens atomically (global logout).
