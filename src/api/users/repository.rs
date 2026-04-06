@@ -20,10 +20,8 @@ impl UserRepository {
         db: &DatabaseConnection,
         email: &str,
     ) -> Result<Option<user::Model>, sea_orm::DbErr> {
-        // Use a DB-level filter so the database can perform the lookup (and use an index).
-        // This is more efficient and avoids loading all rows into memory.
         User::find()
-            .filter(user::Column::Email.eq(email.to_owned()))
+            .filter(user::Column::Email.eq(email))
             .one(db)
             .await
     }

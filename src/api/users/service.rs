@@ -1,21 +1,19 @@
-use crate::api::auth::repository::RefreshTokenRepository;
+use crate::api::refresh_tokens::repository::RefreshTokenRepository;
 use crate::api::users::dto::{UpdateUser, UserResponse};
 use crate::api::users::repository::UserRepository;
-use crate::shared::config::load_env_var::JwtConfig;
 use crate::shared::errors::api_errors::ApiError;
 use crate::shared::models::refresh_tokens::refresh_token::ActiveModel as RefreshTokenActiveModel;
 use crate::shared::models::users::user;
 use crate::shared::models::users::user::ActiveModel;
-use crate::shared::utils::auth_utils::{create_jwt, hash_password, verify_password};
+use crate::shared::utils::auth_utils::{hash_password, verify_password};
 use chrono::Utc;
-use sea_orm::{DatabaseConnection, Set};
+use sea_orm::{DatabaseConnection, DbErr, Set};
 use uuid::Uuid;
 
 pub struct UserService;
 
 impl UserService {
-    /// Register a new user. Returns `(id, user_model)` so the handler can build
-    /// the response without an extra DB fetch.
+    /// Register a new user. Returns `(id, user_model)`.
     pub async fn register_user(
         db: &DatabaseConnection,
         name: String,
@@ -25,19 +23,11 @@ impl UserService {
         if name.trim().is_empty() {
             return Err(ApiError::BadRequest("Name cannot be empty".into()));
         }
-        if email.trim().is_empty() {
-            return Err(ApiError::BadRequest("Email cannot be empty".into()));
+        if !is_valid_email(&email) {
+            return Err(ApiError::BadRequest("Invalid email address".into()));
         }
         if password.len() < 8 {
             return Err(ApiError::BadRequest("Password must be at least 8 characters".into()));
-        }
-
-        if UserRepository::find_by_email(db, &email)
-            .await
-            .map_err(|e| ApiError::InternalError(e.to_string()))?
-            .is_some()
-        {
-            return Err(ApiError::Conflict("Email already exists".into()));
         }
 
         let password_hash = hash_password(&password)?;
@@ -52,46 +42,39 @@ impl UserService {
             ..Default::default()
         };
 
-        // exec_with_returning gives us the model back — no extra fetch needed
-        let model = UserRepository::insert(db, active)
-            .await
-            .map_err(|e| ApiError::InternalError(format!("DB insert failed: {}", e)))?;
+        let model = UserRepository::insert(db, active).await.map_err(|e| {
+            // Map DB unique constraint violation to a 409 rather than a 500
+            if is_unique_violation(&e) {
+                ApiError::Conflict("Email already exists".into())
+            } else {
+                ApiError::InternalError(format!("DB insert failed: {}", e))
+            }
+        })?;
 
         Ok((id, model))
     }
 
-    /// Authenticate a user. Returns `(access_token, user_model)` so the handler
-    /// can build the response without a second DB fetch.
+    /// Authenticate a user. Returns the `user_model` on success — the handler
+    /// is responsible for issuing tokens after creating the refresh token.
     pub async fn login(
         db: &DatabaseConnection,
         email: &str,
         password: &str,
-    ) -> Result<(String, user::Model), ApiError> {
+    ) -> Result<user::Model, ApiError> {
         if email.trim().is_empty() || password.is_empty() {
             return Err(ApiError::BadRequest("Email and password must be provided".into()));
         }
 
-        // Fetch user — generic error prevents user enumeration
+        // Generic error on both missing user and wrong password — prevents user enumeration
         let user = UserRepository::find_by_email(db, email)
             .await
             .map_err(|e| ApiError::InternalError(e.to_string()))?
             .ok_or_else(|| ApiError::Unauthorized("Invalid credentials".into()))?;
 
-        // Verify password before touching any session data
         if !verify_password(&user.password_hash, password)? {
             return Err(ApiError::Unauthorized("Invalid credentials".into()));
         }
 
-        // Fetch token_version only after credentials are confirmed
-        let refresh_token = RefreshTokenRepository::find_by_user_id(db, user.id)
-            .await
-            .map_err(|e| ApiError::InternalError(e.to_string()))?
-            .ok_or_else(|| ApiError::InternalError("No session found for user".into()))?;
-
-        let cfg = JwtConfig::get();
-        let token = create_jwt(user.id, Some(refresh_token.token_version), cfg)?;
-
-        // Update last_login
         let active = ActiveModel {
             id: Set(user.id),
             last_login: Set(Some(Utc::now().into())),
@@ -101,7 +84,7 @@ impl UserService {
             .await
             .map_err(|e| ApiError::InternalError(format!("DB update failed: {}", e)))?;
 
-        Ok((token, user))
+        Ok(user)
     }
 
     pub async fn list_users(db: &DatabaseConnection) -> Result<Vec<UserResponse>, ApiError> {
@@ -127,11 +110,17 @@ impl UserService {
         Ok(UserResponse { id: user.id, name: user.name, email: user.email })
     }
 
+    /// Update a user. `caller_id` must match `id` — users can only update themselves.
     pub async fn update_user(
         db: &DatabaseConnection,
+        caller_id: Uuid,
         id: Uuid,
         input: UpdateUser,
     ) -> Result<UserResponse, ApiError> {
+        if caller_id != id {
+            return Err(ApiError::Unauthorized("Cannot modify another user's account".into()));
+        }
+
         let existing = UserRepository::find_by_id(db, id)
             .await
             .map_err(|_| ApiError::InternalError("DB error".to_string()))?
@@ -147,28 +136,32 @@ impl UserService {
         }
 
         if let Some(email) = input.email {
-            if email.trim().is_empty() {
-                return Err(ApiError::BadRequest("Email cannot be empty".into()));
-            }
-            if UserRepository::find_by_email(db, &email)
-                .await
-                .map_err(|_| ApiError::InternalError("DB error".to_string()))?
-                .filter(|u| u.id != id)
-                .is_some()
-            {
-                return Err(ApiError::Conflict("Email already exists".into()));
+            if !is_valid_email(&email) {
+                return Err(ApiError::BadRequest("Invalid email address".into()));
             }
             active.email = Set(email);
         }
 
-        let updated = UserRepository::update(db, active)
-            .await
-            .map_err(|_| ApiError::InternalError("DB update failed".to_string()))?;
+        let updated = UserRepository::update(db, active).await.map_err(|e| {
+            if is_unique_violation(&e) {
+                ApiError::Conflict("Email already exists".into())
+            } else {
+                ApiError::InternalError("DB update failed".to_string())
+            }
+        })?;
 
         Ok(UserResponse { id: updated.id, name: updated.name, email: updated.email })
     }
 
-    pub async fn delete_user(db: &DatabaseConnection, id: Uuid) -> Result<(), ApiError> {
+    /// Delete a user. `caller_id` must match `id` — users can only delete themselves.
+    pub async fn delete_user(
+        db: &DatabaseConnection,
+        caller_id: Uuid,
+        id: Uuid,
+    ) -> Result<(), ApiError> {
+        if caller_id != id {
+            return Err(ApiError::Unauthorized("Cannot delete another user's account".into()));
+        }
         if id == Uuid::nil() {
             return Err(ApiError::BadRequest("Invalid UUID".into()));
         }
@@ -183,11 +176,13 @@ impl UserService {
     }
 
     /// Increment token_version to immediately invalidate all outstanding access tokens.
+    /// Operates on the most recent active token; if none exists, this is a no-op (already logged out).
     pub async fn increment_token_version(db: &DatabaseConnection, id: Uuid) -> Result<(), ApiError> {
-        let record = RefreshTokenRepository::find_by_user_id(db, id)
-            .await
-            .map_err(|_| ApiError::InternalError("DB error".to_string()))?
-            .ok_or_else(|| ApiError::NotFound(format!("User {} not found", id)))?;
+        let record = match RefreshTokenRepository::find_active_by_user_id(db, id).await {
+            Ok(Some(r)) => r,
+            Ok(None) => return Ok(()), // no active session — nothing to invalidate
+            Err(_) => return Err(ApiError::InternalError("DB error".to_string())),
+        };
 
         let new_version = record.token_version + 1;
         let mut active: RefreshTokenActiveModel = record.into();
@@ -199,4 +194,20 @@ impl UserService {
 
         Ok(())
     }
+}
+
+/// Basic email format validation — checks for a single `@` with non-empty local and domain parts.
+fn is_valid_email(email: &str) -> bool {
+    let email = email.trim();
+    if let Some((local, domain)) = email.split_once('@') {
+        !local.is_empty() && domain.contains('.') && !domain.starts_with('.') && !domain.ends_with('.')
+    } else {
+        false
+    }
+}
+
+/// Detect a unique constraint violation from a SeaORM `DbErr`.
+fn is_unique_violation(err: &DbErr) -> bool {
+    let msg = err.to_string().to_lowercase();
+    msg.contains("unique") || msg.contains("duplicate") || msg.contains("23505")
 }

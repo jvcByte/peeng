@@ -1,4 +1,4 @@
-use crate::api::auth::repository::RefreshTokenRepository;
+use crate::api::refresh_tokens::repository::RefreshTokenRepository;
 use crate::api::users::repository::UserRepository;
 use actix_web::{Error, FromRequest, HttpRequest, dev::Payload, error, http::header, web};
 use futures::future::LocalBoxFuture;
@@ -76,17 +76,12 @@ impl FromRequest for AuthenticatedUser {
                 return Err(error::ErrorUnauthorized("Account is disabled"));
             }
 
-            // 7) Single query: fetch the active refresh token for this user.
-            //    This simultaneously confirms an active session exists (no second query needed)
-            //    and provides the token_version for the revocation check below.
-            let tk = RefreshTokenRepository::find_by_user_id(db, user_id)
+            // 7) Single query: fetch the current active refresh token for this user.
+            //    Ordered by created_at DESC so rotation always returns the latest record.
+            let tk = RefreshTokenRepository::find_active_by_user_id(db, user_id)
                 .await
                 .map_err(|_| error::ErrorInternalServerError("Failed to look up session"))?
                 .ok_or_else(|| error::ErrorUnauthorized("No active session"))?;
-
-            if tk.revoked {
-                return Err(error::ErrorUnauthorized("Token revoked or no active session"));
-            }
 
             // 8) If the JWT carries a tv claim, verify it matches the stored version.
             //    Tokens without tv (e.g. legacy) skip this check.

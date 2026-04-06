@@ -60,15 +60,3 @@ pub struct TokenResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user: Option<crate::api::users::dto::UserResponse>,
 }
-
-impl Default for TokenResponse {
-    fn default() -> Self {
-        Self {
-            access_token: String::new(),
-            token_type: "Bearer".to_string(),
-            expires_in: 0,
-            refresh_token: None,
-            user: None,
-        }
-    }
-}

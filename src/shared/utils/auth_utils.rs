@@ -10,6 +10,7 @@ use argon2::{
 use chrono::{Duration, Utc};
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, TokenData, Validation, decode, encode};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 /// JWT claims used in access tokens.
@@ -43,7 +44,11 @@ pub fn verify_password(hash: &str, password: &str) -> Result<bool, ApiError> {
 }
 
 /// Create a signed HS256 JWT access token for `user_id`.
-pub fn create_jwt(user_id: Uuid, token_version: Option<i32>, cfg: &JwtConfig) -> Result<String, ApiError> {
+pub fn create_jwt(
+    user_id: Uuid,
+    token_version: Option<i32>,
+    cfg: &JwtConfig,
+) -> Result<String, ApiError> {
     let exp = (Utc::now() + Duration::minutes(cfg.access_exp_minutes)).timestamp() as usize;
     let claims = Claims { sub: user_id.to_string(), exp, tv: token_version };
     encode(
@@ -65,6 +70,7 @@ pub fn decode_jwt(token: &str, cfg: &JwtConfig) -> Result<TokenData<Claims>, Api
 }
 
 /// Generate a cryptographically secure 128-character hex-encoded opaque refresh token.
+/// The plaintext is returned to the caller once and must never be stored — store the hash instead.
 pub fn generate_refresh_token() -> String {
     let mut bytes = [0u8; 64];
     OsRng.fill_bytes(&mut bytes);
@@ -74,7 +80,24 @@ pub fn generate_refresh_token() -> String {
     })
 }
 
+/// Hash a refresh token with SHA-256 for safe storage.
+/// Fast enough for indexed lookup; the token itself has 512 bits of entropy so
+/// a fast hash is acceptable here (unlike passwords).
+pub fn hash_token(token: &str) -> String {
+    let digest = Sha256::digest(token.as_bytes());
+    digest.iter().fold(String::with_capacity(64), |mut s, b| {
+        s.push_str(&format!("{:02x}", b));
+        s
+    })
+}
+
 /// Compute the refresh token expiry as a Unix timestamp.
 pub fn refresh_expiry_timestamp(cfg: &JwtConfig) -> i64 {
     (Utc::now() + Duration::days(cfg.refresh_exp_days)).timestamp()
+}
+
+/// Convert a Unix timestamp to a `chrono::DateTime<Utc>`.
+pub fn timestamp_to_datetime(ts: i64) -> Result<chrono::DateTime<Utc>, ApiError> {
+    chrono::DateTime::from_timestamp(ts, 0)
+        .ok_or_else(|| ApiError::InternalError("Invalid timestamp".into()))
 }

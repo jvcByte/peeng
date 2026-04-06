@@ -1,7 +1,9 @@
-use crate::api::auth::repository::RefreshTokenRepository;
+use crate::api::refresh_tokens::repository::RefreshTokenRepository;
 use crate::shared::config::load_env_var::JwtConfig;
 use crate::shared::errors::api_errors::ApiError;
-use crate::shared::utils::auth_utils::{create_jwt, generate_refresh_token, refresh_expiry_timestamp};
+use crate::shared::utils::auth_utils::{
+    create_jwt, generate_refresh_token, refresh_expiry_timestamp, timestamp_to_datetime,
+};
 use sea_orm::DatabaseConnection;
 use sea_orm::prelude::DateTimeWithTimeZone;
 use uuid::Uuid;
@@ -9,27 +11,26 @@ use uuid::Uuid;
 pub struct AuthService;
 
 impl AuthService {
-    /// Create a new opaque refresh token, persist it, and return the plain token.
+    /// Create a new refresh token, persist its hash, and return the plain token
+    /// along with the stored `token_version` so callers can embed it in the access token.
     pub async fn create_refresh_for_user(
         db: &DatabaseConnection,
         user_id: Uuid,
-    ) -> Result<String, ApiError> {
+    ) -> Result<(String, i32), ApiError> {
         let cfg = JwtConfig::get();
         let plain = generate_refresh_token();
         let expires_at = Some(DateTimeWithTimeZone::from(
-            chrono::DateTime::from_timestamp(refresh_expiry_timestamp(cfg), 0)
-                .ok_or_else(|| ApiError::InternalError("Failed to compute expiry".into()))?,
+            timestamp_to_datetime(refresh_expiry_timestamp(cfg))?,
         ));
 
-        RefreshTokenRepository::create(db, user_id, plain.clone(), expires_at)
+        let record = RefreshTokenRepository::create(db, user_id, plain.clone(), expires_at)
             .await
             .map_err(|e| ApiError::InternalError(format!("DB error storing refresh token: {}", e)))?;
 
-        Ok(plain)
+        Ok((plain, record.token_version))
     }
 
-    /// Verify a refresh token, rotate it, and return a new access token + new refresh token.
-    /// `find_active_by_token` already filters revoked and expired tokens.
+    /// Verify a refresh token by hash, rotate it, and return a new access token + new refresh token.
     pub async fn verify_and_rotate_refresh(
         db: &DatabaseConnection,
         incoming_plain: &str,
@@ -44,11 +45,10 @@ impl AuthService {
 
         let new_plain = generate_refresh_token();
         let new_expires_at = Some(DateTimeWithTimeZone::from(
-            chrono::DateTime::from_timestamp(refresh_expiry_timestamp(cfg), 0)
-                .ok_or_else(|| ApiError::InternalError("Failed to compute expiry".into()))?,
+            timestamp_to_datetime(refresh_expiry_timestamp(cfg))?,
         ));
 
-        // Persist new token before revoking old one to avoid a window with no valid session
+        // Persist new token before revoking old one — no window with zero valid sessions
         RefreshTokenRepository::create(db, record.user_id, new_plain.clone(), new_expires_at)
             .await
             .map_err(|_| ApiError::InternalError("Failed to store refresh token".into()))?;
@@ -60,7 +60,7 @@ impl AuthService {
         Ok((access_token, new_plain))
     }
 
-    /// Revoke a specific refresh token. Returns the associated user id.
+    /// Revoke a specific refresh token by hash. Returns the associated user id.
     pub async fn revoke_refresh_token(
         db: &DatabaseConnection,
         incoming_plain: &str,
@@ -78,7 +78,10 @@ impl AuthService {
     }
 
     /// Revoke all refresh tokens for a user. Returns number revoked.
-    pub async fn revoke_all_for_user(db: &DatabaseConnection, user_id: Uuid) -> Result<u64, ApiError> {
+    pub async fn revoke_all_for_user(
+        db: &DatabaseConnection,
+        user_id: Uuid,
+    ) -> Result<u64, ApiError> {
         RefreshTokenRepository::revoke_by_user(db, user_id)
             .await
             .map_err(|e| ApiError::InternalError(format!("DB error revoking tokens: {}", e)))

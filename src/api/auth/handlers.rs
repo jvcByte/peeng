@@ -17,7 +17,6 @@ pub async fn register(
 ) -> Result<HttpResponse, ApiError> {
     let req = body.into_inner();
 
-    // register_user returns the inserted model directly — no extra fetch needed
     let (id, user_model) = UserService::register_user(
         &state.db,
         req.name,
@@ -26,12 +25,14 @@ pub async fn register(
     )
     .await?;
 
-    let cfg = JwtConfig::get();
-    let access_token = create_jwt(id, Some(0), cfg)?;
-    let expires_in = cfg.access_exp_minutes * 60;
+    // Create refresh token first — embed its token_version in the access token
+    // so both are consistent from the start and no valid access token exists
+    // without a corresponding session.
+    let (refresh_plain, token_version) = AuthService::create_refresh_for_user(&state.db, id).await?;
 
-    // Persist refresh token after access token is ready
-    let refresh_plain = AuthService::create_refresh_for_user(&state.db, id).await?;
+    let cfg = JwtConfig::get();
+    let access_token = create_jwt(id, Some(token_version), cfg)?;
+    let expires_in = cfg.access_exp_minutes * 60;
 
     Ok(HttpResponse::Created().json(TokenResponse {
         access_token,
@@ -53,12 +54,16 @@ pub async fn login(
 ) -> Result<HttpResponse, ApiError> {
     let req = body.into_inner();
 
-    // login returns (token, user_model) — no second fetch needed
-    let (access_token, user_model) = UserService::login(&state.db, &req.email, &req.password).await?;
+    // Authenticate — returns user model only, no token yet
+    let user_model = UserService::login(&state.db, &req.email, &req.password).await?;
 
-    let refresh_plain = AuthService::create_refresh_for_user(&state.db, user_model.id).await?;
+    // Create refresh token first — embed its token_version in the access token
+    // so both are consistent and the middleware version check passes immediately
+    let (refresh_plain, token_version) =
+        AuthService::create_refresh_for_user(&state.db, user_model.id).await?;
 
     let cfg = JwtConfig::get();
+    let access_token = create_jwt(user_model.id, Some(token_version), cfg)?;
     let expires_in = cfg.access_exp_minutes * 60;
 
     Ok(HttpResponse::Ok().json(TokenResponse {
