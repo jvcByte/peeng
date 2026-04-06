@@ -4,13 +4,18 @@ use crate::shared::config::load_env_var::JwtConfig;
 use crate::shared::errors::api_errors::ApiError;
 use crate::shared::models::users::user;
 use crate::shared::utils::auth_utils::{
-    create_jwt, generate_refresh_token, hash_password, refresh_expiry_timestamp,
+    create_jwt, generate_refresh_token, hash_password, hash_token, refresh_expiry_timestamp,
     timestamp_to_datetime,
 };
+use crate::shared::utils::validation::{is_unique_violation_str, is_valid_email};
 use chrono::Utc;
 use sea_orm::prelude::DateTimeWithTimeZone;
 use sea_orm::{DatabaseConnection, Set, TransactionTrait};
 use uuid::Uuid;
+
+/// Sentinel used to propagate a typed "token not found" error out of a transaction
+/// without relying on fragile string matching.
+const TOKEN_NOT_FOUND: &str = "TOKEN_NOT_FOUND";
 
 pub struct AuthService;
 
@@ -33,6 +38,9 @@ impl AuthService {
 
     /// Register a user and create their first refresh token atomically.
     /// Returns `(user_model, refresh_token_plaintext)`.
+    ///
+    /// Note: `hash_password` (Argon2, CPU-intensive) is called *before* the transaction
+    /// to avoid holding the DB connection open during hashing.
     pub async fn register(
         db: &DatabaseConnection,
         name: String,
@@ -51,6 +59,8 @@ impl AuthService {
             return Err(ApiError::BadRequest("Password must be at least 8 characters".into()));
         }
 
+        // Hash password before the transaction — Argon2 is CPU-intensive and should
+        // not hold a DB connection open while running.
         let password_hash = hash_password(&password)?;
         let id = Uuid::new_v4();
         let cfg = JwtConfig::get();
@@ -84,8 +94,7 @@ impl AuthService {
             })
             .await
             .map_err(|e| {
-                let msg = e.to_string().to_lowercase();
-                if msg.contains("unique") || msg.contains("duplicate") || msg.contains("23505") {
+                if is_unique_violation_str(&e.to_string()) {
                     ApiError::Conflict("Email already exists".into())
                 } else {
                     ApiError::InternalError(format!("Registration failed: {}", e))
@@ -108,16 +117,19 @@ impl AuthService {
             timestamp_to_datetime(refresh_expiry_timestamp(cfg))?,
         ));
 
-        let incoming_hash = crate::shared::utils::auth_utils::hash_token(incoming_plain);
+        // Hash before the transaction so the closure is `'static`-compatible
+        let incoming_hash = hash_token(incoming_plain);
         let new_plain_for_txn = new_plain.clone();
 
         let access_token = db
             .transaction::<_, String, sea_orm::DbErr>(|txn| {
                 Box::pin(async move {
-                    // Lookup inside the transaction — eliminates TOCTOU race
                     let record = RefreshTokenRepository::find_active_by_token_hash(txn, &incoming_hash)
                         .await?
-                        .ok_or_else(|| sea_orm::DbErr::RecordNotFound("Invalid or expired refresh token".into()))?;
+                        .ok_or_else(|| {
+                            // Use a typed sentinel — avoids fragile string matching on the outside
+                            sea_orm::DbErr::Custom(TOKEN_NOT_FOUND.to_string())
+                        })?;
 
                     let user = UserRepository::find_by_id(txn, record.user_id)
                         .await?
@@ -135,9 +147,9 @@ impl AuthService {
             })
             .await
             .map_err(|e| {
-                let msg = e.to_string();
-                if msg.contains("Invalid or expired refresh token") {
-                    ApiError::Unauthorized(msg)
+                // Match on the typed sentinel — no fragile substring search
+                if e.to_string().contains(TOKEN_NOT_FOUND) {
+                    ApiError::Unauthorized("Invalid or expired refresh token".into())
                 } else {
                     ApiError::InternalError(format!("Token rotation failed: {}", e))
                 }
@@ -164,32 +176,18 @@ impl AuthService {
     }
 
     /// Revoke all refresh tokens and invalidate all access tokens atomically (global logout).
-    /// Returns number of refresh tokens revoked.
     pub async fn revoke_all_and_invalidate(
         db: &DatabaseConnection,
         user_id: Uuid,
-    ) -> Result<u64, ApiError> {
-        db.transaction::<_, u64, sea_orm::DbErr>(|txn| {
+    ) -> Result<(), ApiError> {
+        db.transaction::<_, (), sea_orm::DbErr>(|txn| {
             Box::pin(async move {
-                let count = RefreshTokenRepository::revoke_by_user(txn, user_id).await?;
+                RefreshTokenRepository::revoke_by_user(txn, user_id).await?;
                 UserRepository::increment_token_version(txn, user_id).await?;
-                Ok(count)
+                Ok(())
             })
         })
         .await
         .map_err(|e| ApiError::InternalError(format!("Global logout failed: {}", e)))
-    }
-}
-
-/// Basic email format validation.
-pub fn is_valid_email(email: &str) -> bool {
-    let email = email.trim();
-    if let Some((local, domain)) = email.split_once('@') {
-        !local.is_empty()
-            && domain.contains('.')
-            && !domain.starts_with('.')
-            && !domain.ends_with('.')
-    } else {
-        false
     }
 }

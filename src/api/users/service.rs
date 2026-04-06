@@ -1,12 +1,12 @@
-use crate::api::auth::service::is_valid_email;
 use crate::api::users::dto::{UpdateUser, UserResponse};
 use crate::api::users::repository::UserRepository;
 use crate::shared::errors::api_errors::ApiError;
 use crate::shared::models::users::user;
 use crate::shared::models::users::user::ActiveModel;
 use crate::shared::utils::auth_utils::verify_password;
+use crate::shared::utils::validation::{is_unique_violation, is_valid_email};
 use chrono::Utc;
-use sea_orm::{DatabaseConnection, DbErr, Set};
+use sea_orm::{DatabaseConnection, Set};
 use uuid::Uuid;
 
 pub struct UserService;
@@ -133,10 +133,4 @@ impl UserService {
         }
         Ok(())
     }
-
-}
-
-fn is_unique_violation(err: &DbErr) -> bool {
-    let msg = err.to_string().to_lowercase();
-    msg.contains("unique") || msg.contains("duplicate") || msg.contains("23505")
 }

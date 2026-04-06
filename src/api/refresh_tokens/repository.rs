@@ -3,7 +3,7 @@ use crate::shared::utils::auth_utils::hash_token;
 use chrono::Utc;
 use sea_orm::prelude::DateTimeWithTimeZone;
 use sea_orm::{
-    ColumnTrait, ConnectionTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, Set,
+    ColumnTrait, ConnectionTrait, DbErr, EntityTrait, QueryFilter, Set,
 };
 use uuid::Uuid;
 
@@ -93,7 +93,7 @@ impl RefreshTokenRepository {
     }
 
     /// Delete all expired refresh tokens — single DB-level DELETE.
-    pub async fn delete_expired(db: &DatabaseConnection) -> Result<u64, DbErr> {
+    pub async fn delete_expired(db: &impl ConnectionTrait) -> Result<u64, DbErr> {
         let now: DateTimeWithTimeZone = Utc::now().into();
         RefreshToken::delete_many()
             .filter(refresh_token::Column::ExpiresAt.lt(now))
