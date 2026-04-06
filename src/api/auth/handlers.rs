@@ -25,13 +25,11 @@ pub async fn register(
     )
     .await?;
 
-    // Create refresh token first — embed its token_version in the access token
-    // so both are consistent from the start and no valid access token exists
-    // without a corresponding session.
-    let (refresh_plain, token_version) = AuthService::create_refresh_for_user(&state.db, id).await?;
+    // Create refresh token first, then issue access token with users.token_version
+    let refresh_plain = AuthService::create_refresh_for_user(&state.db, id).await?;
 
     let cfg = JwtConfig::get();
-    let access_token = create_jwt(id, Some(token_version), cfg)?;
+    let access_token = create_jwt(id, Some(user_model.token_version), cfg)?;
     let expires_in = cfg.access_exp_minutes * 60;
 
     Ok(HttpResponse::Created().json(TokenResponse {
@@ -57,13 +55,11 @@ pub async fn login(
     // Authenticate — returns user model only, no token yet
     let user_model = UserService::login(&state.db, &req.email, &req.password).await?;
 
-    // Create refresh token first — embed its token_version in the access token
-    // so both are consistent and the middleware version check passes immediately
-    let (refresh_plain, token_version) =
-        AuthService::create_refresh_for_user(&state.db, user_model.id).await?;
+    // Create refresh token, then issue access token with users.token_version
+    let refresh_plain = AuthService::create_refresh_for_user(&state.db, user_model.id).await?;
 
     let cfg = JwtConfig::get();
-    let access_token = create_jwt(user_model.id, Some(token_version), cfg)?;
+    let access_token = create_jwt(user_model.id, Some(user_model.token_version), cfg)?;
     let expires_in = cfg.access_exp_minutes * 60;
 
     Ok(HttpResponse::Ok().json(TokenResponse {

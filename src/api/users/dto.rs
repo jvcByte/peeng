@@ -11,6 +11,12 @@ pub struct UpdateUser {
     pub email: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ListUsersQuery {
+    pub limit: Option<u64>,
+    pub offset: Option<u64>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct UserResponse {
     pub id: Uuid,

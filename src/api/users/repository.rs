@@ -5,8 +5,13 @@ use uuid::Uuid;
 pub struct UserRepository;
 
 impl UserRepository {
-    pub async fn find_all(db: &DatabaseConnection) -> Result<Vec<user::Model>, sea_orm::DbErr> {
-        User::find().all(db).await
+    pub async fn find_all(
+        db: &DatabaseConnection,
+        limit: u64,
+        offset: u64,
+    ) -> Result<Vec<user::Model>, sea_orm::DbErr> {
+        use sea_orm::QuerySelect;
+        User::find().limit(limit).offset(offset).all(db).await
     }
 
     pub async fn find_by_id(

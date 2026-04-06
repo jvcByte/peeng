@@ -3,8 +3,7 @@ use crate::shared::utils::auth_utils::hash_token;
 use chrono::Utc;
 use sea_orm::prelude::DateTimeWithTimeZone;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, Order, QueryFilter,
-    QueryOrder, Set,
+    ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, Set,
 };
 use uuid::Uuid;
 
@@ -24,39 +23,12 @@ impl RefreshTokenRepository {
             id: Set(Uuid::new_v4()),
             user_id: Set(user_id),
             token: Set(token_hash),
-            token_version: Set(0),
+            token_version: Set(0), // kept for schema compatibility; version authority is users.token_version
             revoked: Set(false),
             expires_at: Set(expires_at),
             created_at: Set(Some(Utc::now().into())),
         };
         RefreshToken::insert(active).exec_with_returning(db).await
-    }
-
-    pub async fn update(
-        db: &DatabaseConnection,
-        model: refresh_token::ActiveModel,
-    ) -> Result<refresh_token::Model, DbErr> {
-        model.update(db).await
-    }
-
-    /// Find the current active (non-revoked) refresh token for a user.
-    /// Returns the most recently created one to handle rotation correctly.
-    pub async fn find_active_by_user_id(
-        db: &DatabaseConnection,
-        user_id: Uuid,
-    ) -> Result<Option<refresh_token::Model>, DbErr> {
-        let now: DateTimeWithTimeZone = Utc::now().into();
-        RefreshToken::find()
-            .filter(refresh_token::Column::UserId.eq(user_id))
-            .filter(refresh_token::Column::Revoked.eq(false))
-            .filter(
-                sea_orm::Condition::any()
-                    .add(refresh_token::Column::ExpiresAt.is_null())
-                    .add(refresh_token::Column::ExpiresAt.gt(now)),
-            )
-            .order_by(refresh_token::Column::CreatedAt, Order::Desc)
-            .one(db)
-            .await
     }
 
     /// Find a single active (non-revoked, non-expired) token by hashing the presented plaintext

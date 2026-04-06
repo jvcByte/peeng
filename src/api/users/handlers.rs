@@ -1,5 +1,5 @@
 use super::service::UserService;
-use crate::api::users::dto::UpdateUser;
+use crate::api::users::dto::{ListUsersQuery, UpdateUser};
 use crate::shared::config::app_state::AppState;
 use crate::shared::errors::api_errors::ApiError;
 use crate::shared::middleware::auth::AuthenticatedUser;
@@ -8,9 +8,12 @@ use uuid::Uuid;
 
 pub async fn list_users(
     _user: AuthenticatedUser,
+    query: web::Query<ListUsersQuery>,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, ApiError> {
-    let users = UserService::list_users(&state.db).await?;
+    let limit = query.limit.unwrap_or(50).min(200);
+    let offset = query.offset.unwrap_or(0);
+    let users = UserService::list_users(&state.db, limit, offset).await?;
     Ok(HttpResponse::Ok().json(users))
 }
 

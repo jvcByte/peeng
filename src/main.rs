@@ -3,7 +3,6 @@ mod shared;
 
 use crate::api::home::routes::home_routes;
 use crate::api::routes::routes;
-
 use crate::shared::config::load_env_var::{EnvVariables, JwtConfig};
 use crate::shared::config::{app_state::AppState, postgres};
 use actix_cors::Cors;
@@ -12,29 +11,22 @@ use actix_web::middleware::NormalizePath;
 use actix_web::{App, HttpServer, middleware::Logger, web};
 use dotenvy::dotenv;
 use env_logger::Env;
-use log::error;
+use log::{error, info};
 use migration::{Migrator, MigratorTrait};
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    // Load .env (if present) and initialize logging.
     dotenv().ok();
     let env = Env::default().filter_or("RUST_LOG", "info");
     env_logger::Builder::from_env(env).init();
 
-    // Validate and cache all config from environment at startup.
-    // This panics immediately if required vars (e.g. JWT_SECRET) are missing,
-    // rather than surfacing as a 500 error on the first authenticated request.
     JwtConfig::init();
     EnvVariables::init();
 
-    // Initialize DB connection via the postgres module. This requires the
-    // `DATABASE_URL` environment variable to be set. No secrets are hardcoded here.
     let db = match postgres::init_db().await {
         Ok(db) => db,
         Err(e) => {
             error!("failed to initialize database: {}", e);
-            // Exit with non-zero status so orchestrators/CI notice startup failure.
             std::process::exit(1);
         }
     };
@@ -43,7 +35,21 @@ async fn main() -> std::io::Result<()> {
         std::process::exit(1);
     }
 
-    // Build application state and start server.
+    // Spawn background task to clean up expired refresh tokens every 6 hours
+    let cleanup_db = db.clone();
+    tokio::spawn(async move {
+        use crate::api::refresh_tokens::repository::RefreshTokenRepository;
+        use tokio::time::{Duration, interval};
+        let mut ticker = interval(Duration::from_secs(6 * 60 * 60));
+        loop {
+            ticker.tick().await;
+            match RefreshTokenRepository::delete_expired(&cleanup_db).await {
+                Ok(n) => info!("cleanup: deleted {} expired refresh tokens", n),
+                Err(e) => error!("cleanup: failed to delete expired tokens: {}", e),
+            }
+        }
+    });
+
     let state = web::Data::new(AppState::new(db));
 
     let address = EnvVariables::get().address.clone();

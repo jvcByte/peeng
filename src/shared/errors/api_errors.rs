@@ -35,8 +35,13 @@ impl ResponseError for ApiError {
     }
 
     fn error_response(&self) -> HttpResponse {
-        HttpResponse::build(self.status_code()).json(json!({
-            "error": self.to_string()
-        }))
+        let mut builder = HttpResponse::build(self.status_code());
+        if matches!(self, ApiError::Unauthorized(_)) {
+            builder.insert_header((
+                actix_web::http::header::WWW_AUTHENTICATE,
+                "Bearer realm=\"peeng\"",
+            ));
+        }
+        builder.json(json!({ "error": self.to_string() }))
     }
 }

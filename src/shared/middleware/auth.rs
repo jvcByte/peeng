@@ -1,7 +1,7 @@
-use crate::api::refresh_tokens::repository::RefreshTokenRepository;
 use crate::api::users::repository::UserRepository;
 use actix_web::{Error, FromRequest, HttpRequest, dev::Payload, error, http::header, web};
-use futures::future::LocalBoxFuture;
+use std::future::Future;
+use std::pin::Pin;
 use uuid::Uuid;
 
 use crate::shared::config::app_state::AppState;
@@ -22,12 +22,10 @@ pub struct AuthenticatedUser {
 /// 1. Parse `Authorization: Bearer <token>` header (case-insensitive scheme).
 /// 2. Decode and validate the JWT (signature + expiry).
 /// 3. Look up the user in DB — reject if not found or inactive.
-/// 4. If the token carries a `tv` claim, verify it matches the stored `token_version`.
-/// 5. Confirm the user has at least one active (non-revoked, non-expired) refresh token.
-///    Steps 4 and 5 share a single DB query.
+/// 4. If the token carries a `tv` claim, verify it matches `users.token_version`.
 impl FromRequest for AuthenticatedUser {
     type Error = Error;
-    type Future = LocalBoxFuture<'static, Result<Self, Self::Error>>;
+    type Future = Pin<Box<dyn Future<Output = Result<Self, Self::Error>>>>;
 
     fn from_request(req: &HttpRequest, _payload: &mut Payload) -> Self::Future {
         let auth_header = req
@@ -40,8 +38,9 @@ impl FromRequest for AuthenticatedUser {
 
         Box::pin(async move {
             // 1) Ensure Authorization header is present
-            let auth = auth_header
-                .ok_or_else(|| error::ErrorUnauthorized("Missing Authorization header"))?;
+            let auth = auth_header.ok_or_else(|| {
+                error::ErrorUnauthorized("Missing Authorization header")
+            })?;
 
             // 2) Parse "Bearer <token>" — case-insensitive per HTTP spec
             let token = auth
@@ -53,7 +52,7 @@ impl FromRequest for AuthenticatedUser {
 
             // 3) Decode and validate JWT (signature + expiry checked by jsonwebtoken)
             let cfg = JwtConfig::get();
-            let token_data = decode_jwt(token, &cfg)
+            let token_data = decode_jwt(token, cfg)
                 .map_err(|_| error::ErrorUnauthorized("Invalid or expired token"))?;
 
             // 4) Parse subject as UUID
@@ -76,17 +75,11 @@ impl FromRequest for AuthenticatedUser {
                 return Err(error::ErrorUnauthorized("Account is disabled"));
             }
 
-            // 7) Single query: fetch the current active refresh token for this user.
-            //    Ordered by created_at DESC so rotation always returns the latest record.
-            let tk = RefreshTokenRepository::find_active_by_user_id(db, user_id)
-                .await
-                .map_err(|_| error::ErrorInternalServerError("Failed to look up session"))?
-                .ok_or_else(|| error::ErrorUnauthorized("No active session"))?;
-
-            // 8) If the JWT carries a tv claim, verify it matches the stored version.
-            //    Tokens without tv (e.g. legacy) skip this check.
+            // 7) Verify token version against users.token_version — single source of truth.
+            //    Incrementing users.token_version immediately invalidates all sessions.
+            //    Tokens without a tv claim (legacy) skip this check.
             if let Some(token_tv) = token_data.claims.tv {
-                if token_tv != tk.token_version {
+                if token_tv != user.token_version {
                     return Err(error::ErrorUnauthorized("Token has been revoked"));
                 }
             }

@@ -1,8 +1,6 @@
-use crate::api::refresh_tokens::repository::RefreshTokenRepository;
 use crate::api::users::dto::{UpdateUser, UserResponse};
 use crate::api::users::repository::UserRepository;
 use crate::shared::errors::api_errors::ApiError;
-use crate::shared::models::refresh_tokens::refresh_token::ActiveModel as RefreshTokenActiveModel;
 use crate::shared::models::users::user;
 use crate::shared::models::users::user::ActiveModel;
 use crate::shared::utils::auth_utils::{hash_password, verify_password};
@@ -87,8 +85,12 @@ impl UserService {
         Ok(user)
     }
 
-    pub async fn list_users(db: &DatabaseConnection) -> Result<Vec<UserResponse>, ApiError> {
-        let users = UserRepository::find_all(db)
+    pub async fn list_users(
+        db: &DatabaseConnection,
+        limit: u64,
+        offset: u64,
+    ) -> Result<Vec<UserResponse>, ApiError> {
+        let users = UserRepository::find_all(db, limit, offset)
             .await
             .map_err(|_| ApiError::InternalError("DB error".to_string()))?;
 
@@ -99,9 +101,6 @@ impl UserService {
     }
 
     pub async fn get_user(db: &DatabaseConnection, id: Uuid) -> Result<UserResponse, ApiError> {
-        if id == Uuid::nil() {
-            return Err(ApiError::BadRequest("Invalid UUID".into()));
-        }
         let user = UserRepository::find_by_id(db, id)
             .await
             .map_err(|_| ApiError::InternalError("DB error".to_string()))?
@@ -162,9 +161,6 @@ impl UserService {
         if caller_id != id {
             return Err(ApiError::Unauthorized("Cannot delete another user's account".into()));
         }
-        if id == Uuid::nil() {
-            return Err(ApiError::BadRequest("Invalid UUID".into()));
-        }
         let rows = UserRepository::delete(db, id)
             .await
             .map_err(|_| ApiError::InternalError("DB delete failed".to_string()))?;
@@ -175,22 +171,23 @@ impl UserService {
         Ok(())
     }
 
-    /// Increment token_version to immediately invalidate all outstanding access tokens.
-    /// Operates on the most recent active token; if none exists, this is a no-op (already logged out).
+    /// Increment users.token_version to immediately invalidate all outstanding access tokens
+    /// across every session. Single UPDATE — reliable global revocation.
     pub async fn increment_token_version(db: &DatabaseConnection, id: Uuid) -> Result<(), ApiError> {
-        let record = match RefreshTokenRepository::find_active_by_user_id(db, id).await {
-            Ok(Some(r)) => r,
-            Ok(None) => return Ok(()), // no active session — nothing to invalidate
-            Err(_) => return Err(ApiError::InternalError("DB error".to_string())),
-        };
-
-        let new_version = record.token_version + 1;
-        let mut active: RefreshTokenActiveModel = record.into();
-        active.token_version = Set(new_version);
-
-        RefreshTokenRepository::update(db, active)
+        let user = UserRepository::find_by_id(db, id)
             .await
-            .map_err(|err| ApiError::InternalError(err.to_string()))?;
+            .map_err(|_| ApiError::InternalError("DB error".to_string()))?
+            .ok_or_else(|| ApiError::NotFound(format!("User {} not found", id)))?;
+
+        let new_version = user.token_version + 1;
+        let active = ActiveModel {
+            id: Set(id),
+            token_version: Set(new_version),
+            ..Default::default()
+        };
+        UserRepository::update(db, active)
+            .await
+            .map_err(|e| ApiError::InternalError(e.to_string()))?;
 
         Ok(())
     }
