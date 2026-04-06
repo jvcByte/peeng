@@ -28,9 +28,6 @@ async fn available_routes() -> impl Responder {
 }
 
 /// Mount all API routes under `/api`.
-///
-/// Example usage from `main.rs`:
-///     .configure(crud_with_sea_orm::api::routes)
 pub fn routes(cfg: &mut web::ServiceConfig) {
     cfg.service(
         web::scope("/api")

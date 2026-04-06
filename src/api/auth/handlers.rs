@@ -9,11 +9,10 @@ use crate::shared::middleware::auth::AuthenticatedUser;
 use crate::shared::models::users::user;
 use crate::shared::utils::auth_utils::create_jwt;
 use actix_web::{HttpResponse, Result, web};
-use serde_json::json;
 
 /// Build a `TokenResponse` from a user model and a plaintext refresh token.
 fn build_token_response(
-    user_model: &user::Model,
+    user_model: user::Model,
     refresh_plain: String,
     include_user: bool,
 ) -> Result<TokenResponse, ApiError> {
@@ -27,8 +26,8 @@ fn build_token_response(
         user: if include_user {
             Some(UserResponse {
                 id: user_model.id,
-                name: user_model.name.clone(),
-                email: user_model.email.clone(),
+                name: user_model.name,
+                email: user_model.email,
             })
         } else {
             None
@@ -45,7 +44,7 @@ pub async fn register(
     let req = body.into_inner();
     let (user_model, refresh_plain) =
         AuthService::register(&state.db, req.name, req.email, req.password).await?;
-    let resp = build_token_response(&user_model, refresh_plain, true)?;
+    let resp = build_token_response(user_model, refresh_plain, true)?;
     Ok(HttpResponse::Created().json(resp))
 }
 
@@ -57,7 +56,7 @@ pub async fn login(
     let req = body.into_inner();
     let user_model = UserService::login(&state.db, &req.email, &req.password).await?;
     let refresh_plain = AuthService::create_refresh_for_user(&state.db, user_model.id).await?;
-    let resp = build_token_response(&user_model, refresh_plain, true)?;
+    let resp = build_token_response(user_model, refresh_plain, true)?;
     Ok(HttpResponse::Ok().json(resp))
 }
 
@@ -105,7 +104,6 @@ pub async fn logout_all(
     user: AuthenticatedUser,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, ApiError> {
-    let count = AuthService::revoke_all_for_user(&state.db, user.id).await?;
-    UserService::increment_token_version(&state.db, user.id).await?;
-    Ok(HttpResponse::Ok().json(json!({ "message": "All sessions revoked", "count": count })))
+    AuthService::revoke_all_and_invalidate(&state.db, user.id).await?;
+    Ok(HttpResponse::NoContent().finish())
 }

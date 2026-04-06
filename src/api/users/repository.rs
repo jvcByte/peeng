@@ -6,7 +6,7 @@ pub struct UserRepository;
 
 impl UserRepository {
     pub async fn find_all(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         limit: u64,
         offset: u64,
     ) -> Result<Vec<user::Model>, sea_orm::DbErr> {
@@ -22,7 +22,7 @@ impl UserRepository {
     }
 
     pub async fn find_by_email(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         email: &str,
     ) -> Result<Option<user::Model>, sea_orm::DbErr> {
         User::find()
@@ -39,14 +39,14 @@ impl UserRepository {
         Ok(updated)
     }
 
-    pub async fn delete(db: &DatabaseConnection, id: Uuid) -> Result<u64, sea_orm::DbErr> {
+    pub async fn delete(db: &impl ConnectionTrait, id: Uuid) -> Result<u64, sea_orm::DbErr> {
         let res = User::delete_by_id(id).exec(db).await?;
         Ok(res.rows_affected)
     }
 
     /// Atomically increment token_version for a user — single UPDATE, no prior SELECT.
     pub async fn increment_token_version(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         id: Uuid,
     ) -> Result<u64, sea_orm::DbErr> {
         use sea_orm::sea_query::Expr;

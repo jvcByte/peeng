@@ -33,7 +33,6 @@ impl AuthService {
 
     /// Register a user and create their first refresh token atomically.
     /// Returns `(user_model, refresh_token_plaintext)`.
-    /// If either the user insert or the token insert fails, both are rolled back.
     pub async fn register(
         db: &DatabaseConnection,
         name: String,
@@ -41,7 +40,7 @@ impl AuthService {
         password: String,
     ) -> Result<(user::Model, String), ApiError> {
         use crate::shared::models::users::user::ActiveModel;
-        // Validate before entering the transaction
+
         if name.trim().is_empty() {
             return Err(ApiError::BadRequest("Name cannot be empty".into()));
         }
@@ -60,15 +59,10 @@ impl AuthService {
             timestamp_to_datetime(refresh_expiry_timestamp(cfg))?,
         ));
 
-        let plain_clone = plain.clone();
+        let plain_for_txn = plain.clone();
 
         let user_model = db
             .transaction::<_, user::Model, sea_orm::DbErr>(|txn| {
-                let name = name.clone();
-                let email = email.clone();
-                let password_hash = password_hash.clone();
-                let plain = plain_clone.clone();
-                let expires_at = expires_at.clone();
                 Box::pin(async move {
                     use sea_orm::EntityTrait;
                     let active = ActiveModel {
@@ -84,13 +78,12 @@ impl AuthService {
                     let model = crate::shared::models::users::User::insert(active)
                         .exec_with_returning(txn)
                         .await?;
-                    RefreshTokenRepository::create(txn, id, plain, expires_at).await?;
+                    RefreshTokenRepository::create(txn, id, plain_for_txn, expires_at).await?;
                     Ok(model)
                 })
             })
             .await
             .map_err(|e| {
-                // TransactionError wraps the inner DbErr — check both
                 let msg = e.to_string().to_lowercase();
                 if msg.contains("unique") || msg.contains("duplicate") || msg.contains("23505") {
                     ApiError::Conflict("Email already exists".into())
@@ -103,48 +96,52 @@ impl AuthService {
     }
 
     /// Verify a refresh token by hash, rotate it, and return a new access token + new refresh token.
-    /// The user fetch, token create, and token revoke are all inside a transaction so
-    /// token_version is read consistently and no orphaned tokens are left on failure.
+    /// The lookup, user fetch, token create, and token revoke are all inside a single transaction
+    /// — eliminates the TOCTOU race and ensures no orphaned tokens on failure.
     pub async fn verify_and_rotate_refresh(
         db: &DatabaseConnection,
         incoming_plain: &str,
     ) -> Result<(String, String), ApiError> {
-        let record = RefreshTokenRepository::find_active_by_token(db, incoming_plain)
-            .await
-            .map_err(|e| ApiError::InternalError(e.to_string()))?
-            .ok_or_else(|| ApiError::Unauthorized("Invalid or expired refresh token".into()))?;
-
         let cfg = JwtConfig::get();
         let new_plain = generate_refresh_token();
         let new_expires_at = Some(DateTimeWithTimeZone::from(
             timestamp_to_datetime(refresh_expiry_timestamp(cfg))?,
         ));
 
-        let new_plain_clone = new_plain.clone();
-        let old_id = record.id;
-        let user_id = record.user_id;
+        let incoming_hash = crate::shared::utils::auth_utils::hash_token(incoming_plain);
+        let new_plain_for_txn = new_plain.clone();
 
-        // Read token_version and perform rotation atomically
         let access_token = db
             .transaction::<_, String, sea_orm::DbErr>(|txn| {
                 Box::pin(async move {
-                    // Read token_version inside the transaction for consistency
-                    let user = UserRepository::find_by_id(txn, user_id)
+                    // Lookup inside the transaction — eliminates TOCTOU race
+                    let record = RefreshTokenRepository::find_active_by_token_hash(txn, &incoming_hash)
+                        .await?
+                        .ok_or_else(|| sea_orm::DbErr::RecordNotFound("Invalid or expired refresh token".into()))?;
+
+                    let user = UserRepository::find_by_id(txn, record.user_id)
                         .await?
                         .ok_or_else(|| sea_orm::DbErr::RecordNotFound("User not found".into()))?;
 
-                    let token = create_jwt(user_id, Some(user.token_version), JwtConfig::get())
+                    let token = create_jwt(record.user_id, Some(user.token_version), JwtConfig::get())
                         .map_err(|e| sea_orm::DbErr::Custom(e.to_string()))?;
 
-                    RefreshTokenRepository::create(txn, user_id, new_plain_clone, new_expires_at)
+                    RefreshTokenRepository::create(txn, record.user_id, new_plain_for_txn, new_expires_at)
                         .await?;
-                    RefreshTokenRepository::revoke_by_id(txn, old_id).await?;
+                    RefreshTokenRepository::revoke_by_id(txn, record.id).await?;
 
                     Ok(token)
                 })
             })
             .await
-            .map_err(|e| ApiError::InternalError(format!("Token rotation failed: {}", e)))?;
+            .map_err(|e| {
+                let msg = e.to_string();
+                if msg.contains("Invalid or expired refresh token") {
+                    ApiError::Unauthorized(msg)
+                } else {
+                    ApiError::InternalError(format!("Token rotation failed: {}", e))
+                }
+            })?;
 
         Ok((access_token, new_plain))
     }
@@ -166,18 +163,26 @@ impl AuthService {
         Ok(())
     }
 
-    /// Revoke all refresh tokens for a user (global logout). Returns number revoked.
-    pub async fn revoke_all_for_user(
+    /// Revoke all refresh tokens and invalidate all access tokens atomically (global logout).
+    /// Returns number of refresh tokens revoked.
+    pub async fn revoke_all_and_invalidate(
         db: &DatabaseConnection,
         user_id: Uuid,
     ) -> Result<u64, ApiError> {
-        RefreshTokenRepository::revoke_by_user(db, user_id)
-            .await
-            .map_err(|e| ApiError::InternalError(format!("DB error revoking tokens: {}", e)))
+        db.transaction::<_, u64, sea_orm::DbErr>(|txn| {
+            Box::pin(async move {
+                let count = RefreshTokenRepository::revoke_by_user(txn, user_id).await?;
+                UserRepository::increment_token_version(txn, user_id).await?;
+                Ok(count)
+            })
+        })
+        .await
+        .map_err(|e| ApiError::InternalError(format!("Global logout failed: {}", e)))
     }
 }
 
-fn is_valid_email(email: &str) -> bool {
+/// Basic email format validation.
+pub fn is_valid_email(email: &str) -> bool {
     let email = email.trim();
     if let Some((local, domain)) = email.split_once('@') {
         !local.is_empty()

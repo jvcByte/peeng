@@ -37,6 +37,15 @@ impl RefreshTokenRepository {
         token: &str,
     ) -> Result<Option<refresh_token::Model>, DbErr> {
         let token_hash = hash_token(token);
+        Self::find_active_by_token_hash(db, &token_hash).await
+    }
+
+    /// Find a single active token by its pre-computed hash.
+    /// Use this inside transactions where the hash is computed before entering the transaction.
+    pub async fn find_active_by_token_hash(
+        db: &impl ConnectionTrait,
+        token_hash: &str,
+    ) -> Result<Option<refresh_token::Model>, DbErr> {
         let now: DateTimeWithTimeZone = Utc::now().into();
         RefreshToken::find()
             .filter(refresh_token::Column::Token.eq(token_hash))

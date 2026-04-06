@@ -1,3 +1,4 @@
+use crate::api::auth::service::is_valid_email;
 use crate::api::users::dto::{UpdateUser, UserResponse};
 use crate::api::users::repository::UserRepository;
 use crate::shared::errors::api_errors::ApiError;
@@ -133,30 +134,6 @@ impl UserService {
         Ok(())
     }
 
-    /// Atomically increment users.token_version — single UPDATE with no prior SELECT.
-    /// Immediately invalidates all outstanding access tokens across every session.
-    pub async fn increment_token_version(db: &DatabaseConnection, id: Uuid) -> Result<(), ApiError> {
-        let rows = UserRepository::increment_token_version(db, id)
-            .await
-            .map_err(|e| ApiError::InternalError(e.to_string()))?;
-
-        if rows == 0 {
-            return Err(ApiError::NotFound(format!("User {} not found", id)));
-        }
-        Ok(())
-    }
-}
-
-fn is_valid_email(email: &str) -> bool {
-    let email = email.trim();
-    if let Some((local, domain)) = email.split_once('@') {
-        !local.is_empty()
-            && domain.contains('.')
-            && !domain.starts_with('.')
-            && !domain.ends_with('.')
-    } else {
-        false
-    }
 }
 
 fn is_unique_violation(err: &DbErr) -> bool {
