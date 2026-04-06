@@ -125,12 +125,3 @@ pub async fn logout_all(
     UserService::increment_token_version(&state.db, user.id).await?;
     Ok(HttpResponse::Ok().json(json!({ "message": "All sessions revoked", "count": count })))
 }
-
-/// Delete expired refresh tokens. Requires authentication.
-pub async fn cleanup_expired_tokens(
-    _user: AuthenticatedUser,
-    state: web::Data<AppState>,
-) -> Result<HttpResponse, ApiError> {
-    let deleted = AuthService::cleanup_expired(&state.db).await?;
-    Ok(HttpResponse::Ok().json(json!({ "message": "Expired tokens cleaned up", "deleted": deleted })))
-}

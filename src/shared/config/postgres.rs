@@ -1,4 +1,3 @@
-use crate::shared::config::load_env_var::EnvVariables;
 use crate::shared::utils::config_utils::redact_url_password;
 use log::info;
 use sea_orm::{ConnectOptions, Database, DatabaseConnection, DbErr};
@@ -6,7 +5,7 @@ use std::error::Error;
 use std::time::Duration;
 
 pub async fn init_db() -> Result<DatabaseConnection, Box<dyn Error + Send + Sync>> {
-    let database_url = EnvVariables::get().db_url.clone();
+    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
 
     info!("Connecting to database: {}", redact_url_password(&database_url));
 

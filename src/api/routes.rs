@@ -15,15 +15,14 @@ async fn available_routes() -> impl Responder {
             "/api (GET)",
             "/api/db_conn (GET)",
             "/api/health (GET)",
-            "/api/users (GET)",
+            "/api/users?limit=&offset= (GET)",
             "/api/users/{id} (GET, PUT, DELETE)",
             "/api/auth/register (POST)",
             "/api/auth/login (POST)",
             "/api/auth/refresh (POST)",
             "/api/auth/logout (POST)",
             "/api/auth/logout-all (POST)",
-            "/api/auth/me (GET)",
-            "/api/auth/cleanup-tokens (POST)"
+            "/api/auth/me (GET)"
         ]
     }))
 }

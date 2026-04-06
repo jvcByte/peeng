@@ -3,7 +3,11 @@ use crate::shared::config::postgres::check_connection;
 use actix_web::{HttpResponse, Responder, web};
 
 pub async fn app_details() -> impl Responder {
-    HttpResponse::Ok().json(serde_json::json!({"Info" : "App Details Coming Soon!"}))
+    HttpResponse::Ok().json(serde_json::json!({
+        "name": "peeng",
+        "description": "Delivery app API",
+        "version": env!("CARGO_PKG_VERSION")
+    }))
 }
 
 /// Simple health-check endpoint so you can verify the server is running.

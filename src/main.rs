@@ -2,6 +2,7 @@ mod api;
 mod shared;
 
 use crate::api::home::routes::home_routes;
+use crate::api::refresh_tokens::repository::RefreshTokenRepository;
 use crate::api::routes::routes;
 use crate::shared::config::load_env_var::{EnvVariables, JwtConfig};
 use crate::shared::config::{app_state::AppState, postgres};
@@ -13,6 +14,7 @@ use dotenvy::dotenv;
 use env_logger::Env;
 use log::{error, info};
 use migration::{Migrator, MigratorTrait};
+use tokio::time::{Duration, interval};
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
@@ -38,8 +40,6 @@ async fn main() -> std::io::Result<()> {
     // Spawn background task to clean up expired refresh tokens every 6 hours
     let cleanup_db = db.clone();
     tokio::spawn(async move {
-        use crate::api::refresh_tokens::repository::RefreshTokenRepository;
-        use tokio::time::{Duration, interval};
         let mut ticker = interval(Duration::from_secs(6 * 60 * 60));
         loop {
             ticker.tick().await;

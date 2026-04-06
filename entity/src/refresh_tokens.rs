@@ -14,7 +14,6 @@ pub mod refresh_token {
         pub id: Uuid,
         pub user_id: Uuid,
         pub token: String,
-        pub token_version: i32,
         pub revoked: bool,
         pub expires_at: Option<DateTimeWithTimeZone>,
         pub created_at: Option<DateTimeWithTimeZone>,

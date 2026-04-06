@@ -11,7 +11,7 @@ pub async fn list_users(
     query: web::Query<ListUsersQuery>,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, ApiError> {
-    let limit = query.limit.unwrap_or(50).min(200);
+    let limit = query.limit.unwrap_or(50).clamp(1, 200);
     let offset = query.offset.unwrap_or(0);
     let users = UserService::list_users(&state.db, limit, offset).await?;
     Ok(HttpResponse::Ok().json(users))

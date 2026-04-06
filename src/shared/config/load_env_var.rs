@@ -13,7 +13,6 @@ pub struct JwtConfig {
 pub struct EnvVariables {
     pub address: String,
     pub port: String,
-    pub db_url: String,
 }
 
 static JWT_CONFIG: OnceLock<JwtConfig> = OnceLock::new();
@@ -52,12 +51,11 @@ impl JwtConfig {
 
 impl EnvVariables {
     pub fn init() {
-        let db_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
         let address = env::var("ADDRESS").unwrap_or_else(|_| "0.0.0.0".to_string());
         let port = env::var("PORT").unwrap_or_else(|_| "8080".to_string());
 
         ENV_VARIABLES
-            .set(EnvVariables { db_url, address, port })
+            .set(EnvVariables { address, port })
             .expect("EnvVariables already initialized");
     }
 

@@ -23,7 +23,6 @@ impl RefreshTokenRepository {
             id: Set(Uuid::new_v4()),
             user_id: Set(user_id),
             token: Set(token_hash),
-            token_version: Set(0), // kept for schema compatibility; version authority is users.token_version
             revoked: Set(false),
             expires_at: Set(expires_at),
             created_at: Set(Some(Utc::now().into())),

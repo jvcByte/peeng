@@ -5,7 +5,7 @@ use crate::shared::models::users::user;
 use crate::shared::models::users::user::ActiveModel;
 use crate::shared::utils::auth_utils::{hash_password, verify_password};
 use chrono::Utc;
-use sea_orm::{DatabaseConnection, DbErr, Set};
+use sea_orm::{ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, Set};
 use uuid::Uuid;
 
 pub struct UserService;
@@ -36,6 +36,7 @@ impl UserService {
             email: Set(email),
             password_hash: Set(password_hash),
             is_active: Set(true),
+            token_version: Set(0),
             created_at: Set(Some(Utc::now().into())),
             ..Default::default()
         };
@@ -68,6 +69,10 @@ impl UserService {
             .await
             .map_err(|e| ApiError::InternalError(e.to_string()))?
             .ok_or_else(|| ApiError::Unauthorized("Invalid credentials".into()))?;
+
+        if !user.is_active {
+            return Err(ApiError::Unauthorized("Invalid credentials".into()));
+        }
 
         if !verify_password(&user.password_hash, password)? {
             return Err(ApiError::Unauthorized("Invalid credentials".into()));
@@ -171,24 +176,23 @@ impl UserService {
         Ok(())
     }
 
-    /// Increment users.token_version to immediately invalidate all outstanding access tokens
-    /// across every session. Single UPDATE — reliable global revocation.
+    /// Atomically increment users.token_version — single UPDATE with no prior SELECT.
+    /// Immediately invalidates all outstanding access tokens across every session.
     pub async fn increment_token_version(db: &DatabaseConnection, id: Uuid) -> Result<(), ApiError> {
-        let user = UserRepository::find_by_id(db, id)
-            .await
-            .map_err(|_| ApiError::InternalError("DB error".to_string()))?
-            .ok_or_else(|| ApiError::NotFound(format!("User {} not found", id)))?;
+        use crate::shared::models::users::user::Column;
+        use sea_orm::sea_query::Expr;
 
-        let new_version = user.token_version + 1;
-        let active = ActiveModel {
-            id: Set(id),
-            token_version: Set(new_version),
-            ..Default::default()
-        };
-        UserRepository::update(db, active)
+        let rows = entity::users::User::update_many()
+            .col_expr(Column::TokenVersion, Expr::col(Column::TokenVersion).add(1))
+            .filter(Column::Id.eq(id))
+            .exec(db)
             .await
-            .map_err(|e| ApiError::InternalError(e.to_string()))?;
+            .map_err(|e| ApiError::InternalError(e.to_string()))?
+            .rows_affected;
 
+        if rows == 0 {
+            return Err(ApiError::NotFound(format!("User {} not found", id)));
+        }
         Ok(())
     }
 }

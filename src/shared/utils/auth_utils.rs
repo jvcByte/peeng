@@ -8,7 +8,7 @@ use argon2::{
     },
 };
 use chrono::{Duration, Utc};
-use hex;
+use hex::encode as hex_encode;
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, TokenData, Validation, decode, encode};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -75,14 +75,12 @@ pub fn decode_jwt(token: &str, cfg: &JwtConfig) -> Result<TokenData<Claims>, Api
 pub fn generate_refresh_token() -> String {
     let mut bytes = [0u8; 64];
     OsRng.fill_bytes(&mut bytes);
-    hex::encode(bytes)
+    hex_encode(bytes)
 }
 
 /// Hash a refresh token with SHA-256 for safe storage.
-/// Fast enough for indexed lookup; the token itself has 512 bits of entropy so
-/// a fast hash is acceptable here (unlike passwords).
 pub fn hash_token(token: &str) -> String {
-    hex::encode(Sha256::digest(token.as_bytes()))
+    hex_encode(Sha256::digest(token.as_bytes()))
 }
 
 /// Compute the refresh token expiry as a Unix timestamp.
