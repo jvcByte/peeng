@@ -5,7 +5,7 @@ use crate::shared::errors::api_errors::ApiError;
 use crate::shared::utils::auth_utils::{
     create_jwt, generate_refresh_token, refresh_expiry_timestamp, timestamp_to_datetime,
 };
-use sea_orm::DatabaseConnection;
+use sea_orm::{DatabaseConnection, TransactionTrait};
 use sea_orm::prelude::DateTimeWithTimeZone;
 use uuid::Uuid;
 
@@ -33,7 +33,7 @@ impl AuthService {
     }
 
     /// Verify a refresh token by hash, rotate it, and return a new access token + new refresh token.
-    /// The access token's tv claim is read from `users.token_version` — the single source of truth.
+    /// The create and revoke are wrapped in a transaction — partial failure leaves no orphaned tokens.
     pub async fn verify_and_rotate_refresh(
         db: &DatabaseConnection,
         incoming_plain: &str,
@@ -43,7 +43,7 @@ impl AuthService {
             .map_err(|e| ApiError::InternalError(e.to_string()))?
             .ok_or_else(|| ApiError::Unauthorized("Invalid or expired refresh token".into()))?;
 
-        // Read token_version from users — not from the refresh token row
+        // Read token_version from users — single source of truth
         let user = UserRepository::find_by_id(db, record.user_id)
             .await
             .map_err(|e| ApiError::InternalError(e.to_string()))?
@@ -57,14 +57,21 @@ impl AuthService {
             timestamp_to_datetime(refresh_expiry_timestamp(cfg))?,
         ));
 
-        // Persist new token before revoking old one — no window with zero valid sessions
-        RefreshTokenRepository::create(db, record.user_id, new_plain.clone(), new_expires_at)
-            .await
-            .map_err(|_| ApiError::InternalError("Failed to store refresh token".into()))?;
+        // Atomic: create new token and revoke old one in a single transaction
+        let new_plain_clone = new_plain.clone();
+        let old_id = record.id;
+        let user_id = record.user_id;
 
-        RefreshTokenRepository::revoke_by_id(db, record.id)
-            .await
-            .map_err(|_| ApiError::InternalError("Failed to revoke old refresh token".into()))?;
+        db.transaction::<_, (), sea_orm::DbErr>(|txn| {
+            Box::pin(async move {
+                RefreshTokenRepository::create(txn, user_id, new_plain_clone, new_expires_at)
+                    .await?;
+                RefreshTokenRepository::revoke_by_id(txn, old_id).await?;
+                Ok(())
+            })
+        })
+        .await
+        .map_err(|e| ApiError::InternalError(format!("Token rotation failed: {}", e)))?;
 
         Ok((access_token, new_plain))
     }
@@ -94,12 +101,5 @@ impl AuthService {
         RefreshTokenRepository::revoke_by_user(db, user_id)
             .await
             .map_err(|e| ApiError::InternalError(format!("DB error revoking tokens: {}", e)))
-    }
-
-    /// Delete expired refresh tokens. Returns number deleted.
-    pub async fn cleanup_expired(db: &DatabaseConnection) -> Result<u64, ApiError> {
-        RefreshTokenRepository::delete_expired(db)
-            .await
-            .map_err(|e| ApiError::InternalError(format!("DB error cleaning tokens: {}", e)))
     }
 }

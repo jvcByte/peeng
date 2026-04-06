@@ -3,7 +3,7 @@ use crate::shared::utils::auth_utils::hash_token;
 use chrono::Utc;
 use sea_orm::prelude::DateTimeWithTimeZone;
 use sea_orm::{
-    ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, Set,
+    ColumnTrait, ConnectionTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, Set,
 };
 use uuid::Uuid;
 
@@ -13,7 +13,7 @@ impl RefreshTokenRepository {
     /// Persist a new refresh token record.
     /// `token` must be the plaintext token — this method hashes it before storing.
     pub async fn create(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         user_id: Uuid,
         token: String,
         expires_at: Option<DateTimeWithTimeZone>,
@@ -51,7 +51,7 @@ impl RefreshTokenRepository {
     }
 
     /// Revoke a single token by id — single UPDATE, no prior SELECT.
-    pub async fn revoke_by_id(db: &DatabaseConnection, id: Uuid) -> Result<(), DbErr> {
+    pub async fn revoke_by_id(db: &impl ConnectionTrait, id: Uuid) -> Result<(), DbErr> {
         let rows = RefreshToken::update_many()
             .col_expr(
                 refresh_token::Column::Revoked,

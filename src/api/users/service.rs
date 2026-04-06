@@ -5,7 +5,7 @@ use crate::shared::models::users::user;
 use crate::shared::models::users::user::ActiveModel;
 use crate::shared::utils::auth_utils::{hash_password, verify_password};
 use chrono::Utc;
-use sea_orm::{ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, Set};
+use sea_orm::{DatabaseConnection, DbErr, Set};
 use uuid::Uuid;
 
 pub struct UserService;
@@ -83,11 +83,11 @@ impl UserService {
             last_login: Set(Some(Utc::now().into())),
             ..Default::default()
         };
-        UserRepository::update(db, active)
+        let updated = UserRepository::update(db, active)
             .await
             .map_err(|e| ApiError::InternalError(format!("DB update failed: {}", e)))?;
 
-        Ok(user)
+        Ok(updated)
     }
 
     pub async fn list_users(
@@ -179,16 +179,9 @@ impl UserService {
     /// Atomically increment users.token_version — single UPDATE with no prior SELECT.
     /// Immediately invalidates all outstanding access tokens across every session.
     pub async fn increment_token_version(db: &DatabaseConnection, id: Uuid) -> Result<(), ApiError> {
-        use crate::shared::models::users::user::Column;
-        use sea_orm::sea_query::Expr;
-
-        let rows = entity::users::User::update_many()
-            .col_expr(Column::TokenVersion, Expr::col(Column::TokenVersion).add(1))
-            .filter(Column::Id.eq(id))
-            .exec(db)
+        let rows = UserRepository::increment_token_version(db, id)
             .await
-            .map_err(|e| ApiError::InternalError(e.to_string()))?
-            .rows_affected;
+            .map_err(|e| ApiError::InternalError(e.to_string()))?;
 
         if rows == 0 {
             return Err(ApiError::NotFound(format!("User {} not found", id)));

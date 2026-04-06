@@ -52,4 +52,18 @@ impl UserRepository {
         let res = User::delete_by_id(id).exec(db).await?;
         Ok(res.rows_affected)
     }
+
+    /// Atomically increment token_version for a user — single UPDATE, no prior SELECT.
+    pub async fn increment_token_version(
+        db: &DatabaseConnection,
+        id: Uuid,
+    ) -> Result<u64, sea_orm::DbErr> {
+        use sea_orm::sea_query::Expr;
+        let res = User::update_many()
+            .col_expr(user::Column::TokenVersion, Expr::col(user::Column::TokenVersion).add(1))
+            .filter(user::Column::Id.eq(id))
+            .exec(db)
+            .await?;
+        Ok(res.rows_affected)
+    }
 }

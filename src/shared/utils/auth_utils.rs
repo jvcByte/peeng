@@ -4,9 +4,10 @@ use argon2::{
     Argon2,
     password_hash::{
         PasswordHash, PasswordHasher, PasswordVerifier, SaltString,
-        rand_core::{OsRng, RngCore},
+        rand_core::OsRng,
     },
 };
+use rand_core::RngCore;
 use chrono::{Duration, Utc};
 use hex::encode as hex_encode;
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, TokenData, Validation, decode, encode};

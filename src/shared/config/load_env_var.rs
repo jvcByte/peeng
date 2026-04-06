@@ -23,7 +23,7 @@ impl JwtConfig {
     pub fn init() {
         let secret = env::var("JWT_SECRET").expect("JWT_SECRET must be set");
         if secret.len() < 32 {
-            panic!("JWT_SECRET must be at least 32 characters for security");
+            panic!("JWT_SECRET must be at least 32 bytes for security");
         }
 
         let access_exp_minutes = env::var("JWT_ACCESS_TOKEN_EXPIRATION_MINUTES")

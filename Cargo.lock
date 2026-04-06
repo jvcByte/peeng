@@ -1976,6 +1976,7 @@ dependencies = [
  "jsonwebtoken",
  "log",
  "migration",
+ "rand_core 0.6.4",
  "sea-orm",
  "serde",
  "serde_json",

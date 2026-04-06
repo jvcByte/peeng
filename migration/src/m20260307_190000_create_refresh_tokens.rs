@@ -8,7 +8,6 @@ pub struct Migration;
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        // Create refresh_tokens table
         manager
             .create_table(
                 Table::create()
@@ -30,9 +29,15 @@ impl MigrationTrait for Migration {
                             .string()
                             .not_null(),
                     )
+                    // token_version was added here originally but has since been moved to
+                    // users.token_version (migration m20260406_000000) and dropped from this
+                    // table (migration m20260406_000001). It is kept here as a plain column
+                    // definition so the initial schema is consistent with what the subsequent
+                    // migrations expect to find and drop.
                     .col(
-                        ColumnDef::new(refresh_token::Column::TokenVersion)
+                        ColumnDef::new(Alias::new("token_version"))
                             .integer()
+                            .not_null()
                             .default(0),
                     )
                     .col(
@@ -42,12 +47,13 @@ impl MigrationTrait for Migration {
                             .default(Value::Bool(Some(false))),
                     )
                     .col(
-                        ColumnDef::new(refresh_token::Column::ExpiresAt).timestamp_with_time_zone(),
+                        ColumnDef::new(refresh_token::Column::ExpiresAt)
+                            .timestamp_with_time_zone(),
                     )
                     .col(
-                        ColumnDef::new(refresh_token::Column::CreatedAt).timestamp_with_time_zone(),
+                        ColumnDef::new(refresh_token::Column::CreatedAt)
+                            .timestamp_with_time_zone(),
                     )
-                    // Foreign key to users(id)
                     .foreign_key(
                         ForeignKey::create()
                             .name("fk_refresh_tokens_user")
@@ -59,7 +65,6 @@ impl MigrationTrait for Migration {
             )
             .await?;
 
-        // Index on token_hash for quick lookup (used when validating presented refresh tokens)
         manager
             .create_index(
                 Index::create()
@@ -72,7 +77,6 @@ impl MigrationTrait for Migration {
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        // Drop index then table
         manager
             .drop_index(
                 Index::drop()

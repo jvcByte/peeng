@@ -25,7 +25,7 @@ pub struct AuthenticatedUser {
 /// 4. If the token carries a `tv` claim, verify it matches `users.token_version`.
 impl FromRequest for AuthenticatedUser {
     type Error = Error;
-    type Future = Pin<Box<dyn Future<Output = Result<Self, Self::Error>>>>;
+    type Future = Pin<Box<dyn Future<Output = Result<Self, Self::Error>> + 'static>>;
 
     fn from_request(req: &HttpRequest, _payload: &mut Payload) -> Self::Future {
         let auth_header = req
