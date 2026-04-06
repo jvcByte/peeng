@@ -1,51 +1,38 @@
 use crate::api::auth::repository::RefreshTokenRepository;
-use crate::api::users::dto::{CreateUser, UpdateUser, UserResponse};
+use crate::api::users::dto::{UpdateUser, UserResponse};
 use crate::api::users::repository::UserRepository;
 use crate::shared::config::load_env_var::JwtConfig;
 use crate::shared::errors::api_errors::ApiError;
 use crate::shared::models::refresh_tokens::refresh_token::ActiveModel as RefreshTokenActiveModel;
+use crate::shared::models::users::user;
 use crate::shared::models::users::user::ActiveModel;
 use crate::shared::utils::auth_utils::{create_jwt, hash_password, verify_password};
 use chrono::Utc;
 use sea_orm::{DatabaseConnection, Set};
 use uuid::Uuid;
 
-/// Service layer for user-related business logic.
-///
-/// This file adjusts register/login to set password fields directly on the ActiveModel
-/// (so we can use the repository's existing `insert` method) and fixes incorrect
-/// Option handling for password_hash / token_version (they are stored as concrete types
-/// in the current entity).
 pub struct UserService;
 
 impl UserService {
-    /// Register a new user with a password.
-    ///
-    /// Production considerations implemented here:
-    /// - Validate inputs (non-empty, password length)
-    /// - Hash password using Argon2 (delegated via `hash_password`)
-    /// - Ensure email uniqueness (DB unique constraint recommended)
-    /// - Store password hash and initial token_version/is_active on the ActiveModel
+    /// Register a new user. Returns `(id, user_model)` so the handler can build
+    /// the response without an extra DB fetch.
     pub async fn register_user(
         db: &DatabaseConnection,
-        input: CreateUser,
+        name: String,
+        email: String,
         password: String,
-    ) -> Result<Uuid, ApiError> {
-        // Basic validation
-        if input.name.trim().is_empty() {
+    ) -> Result<(Uuid, user::Model), ApiError> {
+        if name.trim().is_empty() {
             return Err(ApiError::BadRequest("Name cannot be empty".into()));
         }
-        if input.email.trim().is_empty() {
+        if email.trim().is_empty() {
             return Err(ApiError::BadRequest("Email cannot be empty".into()));
         }
         if password.len() < 8 {
-            return Err(ApiError::BadRequest(
-                "Password must be at least 8 characters".into(),
-            ));
+            return Err(ApiError::BadRequest("Password must be at least 8 characters".into()));
         }
 
-        // Check uniqueness
-        if UserRepository::find_by_email(db, &input.email)
+        if UserRepository::find_by_email(db, &email)
             .await
             .map_err(|e| ApiError::InternalError(e.to_string()))?
             .is_some()
@@ -53,77 +40,58 @@ impl UserService {
             return Err(ApiError::Conflict("Email already exists".into()));
         }
 
-        // Hash password
         let password_hash = hash_password(&password)?;
-
-        // Prepare ActiveModel for insertion with auth fields set directly.
         let id = Uuid::new_v4();
         let active = ActiveModel {
             id: Set(id),
-            name: Set(input.name),
-            email: Set(input.email),
+            name: Set(name),
+            email: Set(email),
             password_hash: Set(password_hash),
             is_active: Set(true),
             created_at: Set(Some(Utc::now().into())),
             ..Default::default()
         };
 
-        // Use existing repository insert to persist the model (no insert_with_password helper needed).
-        UserRepository::insert(db, active)
+        // exec_with_returning gives us the model back — no extra fetch needed
+        let model = UserRepository::insert(db, active)
             .await
             .map_err(|e| ApiError::InternalError(format!("DB insert failed: {}", e)))?;
 
-        Ok(id)
+        Ok((id, model))
     }
 
-    /// Authenticate a user and return a JWT.
-    ///
-    /// Implementation notes:
-    /// - The repository returns the user's stored password hash and token version.
-    /// - We verify the password using Argon2 (via `verify_password`).
-    /// - On success, we create a signed JWT using `create_jwt`.
-    /// - Token versioning (`tv`) is embedded in the token so that changing a user's
-    ///   `token_version` in the DB can immediately invalidate previously issued tokens.
+    /// Authenticate a user. Returns `(access_token, user_model)` so the handler
+    /// can build the response without a second DB fetch.
     pub async fn login(
         db: &DatabaseConnection,
         email: &str,
         password: &str,
-    ) -> Result<String, ApiError> {
+    ) -> Result<(String, user::Model), ApiError> {
         if email.trim().is_empty() || password.is_empty() {
-            return Err(ApiError::BadRequest(
-                "Email and password must be provided".into(),
-            ));
+            return Err(ApiError::BadRequest("Email and password must be provided".into()));
         }
 
-        // Fetch user (repository returns the full model including password_hash and token_version)
+        // Fetch user — generic error prevents user enumeration
         let user = UserRepository::find_by_email(db, email)
             .await
             .map_err(|e| ApiError::InternalError(e.to_string()))?
-            .ok_or_else(|| ApiError::NotFound("Invalid Email Address".into()))?;
+            .ok_or_else(|| ApiError::Unauthorized("Invalid credentials".into()))?;
 
-        // Fetch refresh_token
+        // Verify password before touching any session data
+        if !verify_password(&user.password_hash, password)? {
+            return Err(ApiError::Unauthorized("Invalid credentials".into()));
+        }
+
+        // Fetch token_version only after credentials are confirmed
         let refresh_token = RefreshTokenRepository::find_by_user_id(db, user.id)
             .await
             .map_err(|e| ApiError::InternalError(e.to_string()))?
-            .ok_or_else(|| ApiError::NotFound("No refresh token found for user".into()))?;
+            .ok_or_else(|| ApiError::InternalError("No session found for user".into()))?;
 
-        // Extract password_hash and token_version directly (concrete types in entity)
-        let stored_hash: String = user.password_hash;
-        let tv: i32 = refresh_token.token_version;
-
-        // Verify password
-        let ok = verify_password(&stored_hash, password)?;
-        if !ok {
-            return Err(ApiError::NotFound("Invalid Password".into()));
-        }
-
-        // Build auth config from env (JWT secret, expiry)
         let cfg = JwtConfig::get();
+        let token = create_jwt(user.id, Some(refresh_token.token_version), cfg)?;
 
-        // Create token
-        let token = create_jwt(user.id, tv, &cfg)?;
-
-        // Update the last_login column on users table
+        // Update last_login
         let active = ActiveModel {
             id: Set(user.id),
             last_login: Set(Some(Utc::now().into())),
@@ -133,7 +101,7 @@ impl UserService {
             .await
             .map_err(|e| ApiError::InternalError(format!("DB update failed: {}", e)))?;
 
-        Ok(token)
+        Ok((token, user))
     }
 
     pub async fn list_users(db: &DatabaseConnection) -> Result<Vec<UserResponse>, ApiError> {
@@ -143,11 +111,7 @@ impl UserService {
 
         Ok(users
             .into_iter()
-            .map(|m| UserResponse {
-                id: m.id,
-                name: m.name,
-                email: m.email,
-            })
+            .map(|m| UserResponse { id: m.id, name: m.name, email: m.email })
             .collect())
     }
 
@@ -155,17 +119,12 @@ impl UserService {
         if id == Uuid::nil() {
             return Err(ApiError::BadRequest("Invalid UUID".into()));
         }
-
         let user = UserRepository::find_by_id(db, id)
             .await
             .map_err(|_| ApiError::InternalError("DB error".to_string()))?
             .ok_or_else(|| ApiError::NotFound(format!("User {} not found", id)))?;
 
-        Ok(UserResponse {
-            id: user.id,
-            name: user.name,
-            email: user.email,
-        })
+        Ok(UserResponse { id: user.id, name: user.name, email: user.email })
     }
 
     pub async fn update_user(
@@ -206,18 +165,13 @@ impl UserService {
             .await
             .map_err(|_| ApiError::InternalError("DB update failed".to_string()))?;
 
-        Ok(UserResponse {
-            id: updated.id,
-            name: updated.name,
-            email: updated.email,
-        })
+        Ok(UserResponse { id: updated.id, name: updated.name, email: updated.email })
     }
 
     pub async fn delete_user(db: &DatabaseConnection, id: Uuid) -> Result<(), ApiError> {
         if id == Uuid::nil() {
             return Err(ApiError::BadRequest("Invalid UUID".into()));
         }
-
         let rows = UserRepository::delete(db, id)
             .await
             .map_err(|_| ApiError::InternalError("DB delete failed".to_string()))?;
@@ -225,23 +179,19 @@ impl UserService {
         if rows == 0 {
             return Err(ApiError::NotFound(format!("User {} not found", id)));
         }
-
         Ok(())
     }
 
-    /// Increment a user's token_version to invalidate all issued access tokens.
-    /// This is useful for logout or security events (password change, etc).
-    pub async fn increment_token_version(
-        db: &DatabaseConnection,
-        id: Uuid,
-    ) -> Result<(), ApiError> {
-        let refresh_token = RefreshTokenRepository::find_by_user_id(db, id)
+    /// Increment token_version to immediately invalidate all outstanding access tokens.
+    pub async fn increment_token_version(db: &DatabaseConnection, id: Uuid) -> Result<(), ApiError> {
+        let record = RefreshTokenRepository::find_by_user_id(db, id)
             .await
             .map_err(|_| ApiError::InternalError("DB error".to_string()))?
             .ok_or_else(|| ApiError::NotFound(format!("User {} not found", id)))?;
 
-        let mut active: RefreshTokenActiveModel = refresh_token.into();
-        active.token_version = Set(active.token_version.unwrap() + 1);
+        let new_version = record.token_version + 1;
+        let mut active: RefreshTokenActiveModel = record.into();
+        active.token_version = Set(new_version);
 
         RefreshTokenRepository::update(db, active)
             .await
@@ -249,6 +199,4 @@ impl UserService {
 
         Ok(())
     }
-
-    // Similarly implement update, delete, get, list with validation
 }
