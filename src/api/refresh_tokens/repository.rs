@@ -30,16 +30,6 @@ impl RefreshTokenRepository {
         RefreshToken::insert(active).exec_with_returning(db).await
     }
 
-    /// Find a single active (non-revoked, non-expired) token by hashing the presented plaintext
-    /// and looking up the hash via the DB index.
-    pub async fn find_active_by_token(
-        db: &impl ConnectionTrait,
-        token: &str,
-    ) -> Result<Option<refresh_token::Model>, DbErr> {
-        let token_hash = hash_token(token);
-        Self::find_active_by_token_hash(db, &token_hash).await
-    }
-
     /// Find a single active token by its pre-computed hash.
     /// Use this inside transactions where the hash is computed before entering the transaction.
     pub async fn find_active_by_token_hash(
