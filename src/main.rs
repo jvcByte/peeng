@@ -19,7 +19,7 @@ use tokio::time::{Duration, interval};
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     dotenv().ok();
-    let env = Env::default().filter_or("RUST_LOG", "info");
+    let env = Env::default().filter_or("RUST_LOG", "debug");
     env_logger::Builder::from_env(env).init();
 
     JwtConfig::init();
